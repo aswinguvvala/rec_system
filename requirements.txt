@@ -1,0 +1,11 @@
+# Pinned to versions verified working in this environment (Python 3.12).
+# pandas is pinned below 3.0 deliberately: pandas 3.0.5's compiled Cython
+# extensions were blocked by this machine's Windows Application Control
+# policy on install; 2.2.3 is a well-established release that loads cleanly.
+pandas==2.2.3
+numpy==2.5.1
+scipy==1.18.0
+scikit-learn==1.9.0
+streamlit==1.60.0
+pytest==9.1.1
+requests==2.34.2
