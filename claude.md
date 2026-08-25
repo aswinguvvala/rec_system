@@ -122,12 +122,27 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   for Windows `MAX_PATH`, breaking `pip install` (`WinError 206`). Worked around by
   using a short path directly under the user's home directory instead.
 
+## Git status
+- Git installed via winget (2.55.0), not on PATH in already-open shells -- invoke via
+  full path `C:\Program Files\Git\bin\git.exe` or open a new shell.
+- Local identity set (repo-local, not global): user.name/user.email both
+  `aswinabd17@gmail.com` (user's explicit choice).
+- Repo initialized, single root commit `f8f74f7` on branch `master` with the 15
+  git-tracked files (everything except `data/`, `venv/`, caches -- see `.gitignore`).
+- Verified for real (not simulated) after git existed: `git clone` into a fresh dir ->
+  fresh venv -> `pip install -r requirements.txt` -> `pytest tests/ -v` (41 passed) ->
+  `streamlit run app.py` against empty `data/`, forced a real script execution via
+  `AppTest` -> auto-downloaded MovieLens 100K and rendered with zero exceptions. This
+  supersedes the earlier manual-file-mirror simulation noted in Phase 6 (that was a
+  workaround for git not existing yet; no longer needed, but left below as history).
+- No remote configured -- repo has not been pushed anywhere yet. That's the next step
+  whenever the user is ready to deploy (Streamlit Community Cloud / HF Spaces need a
+  GitHub remote).
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
   pandas==2.2.3 instead, which installs and imports cleanly.
-- Git is not installed on this dev machine, so the repo has not been `git init`'d yet.
-  Do not assume git commands will work until this is resolved.
 
 ## Commands
 - Run app: `streamlit run app.py`
