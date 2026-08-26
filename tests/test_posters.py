@@ -2,7 +2,13 @@
 
 import requests
 
-from src.posters import _normalize_title, get_poster_url, get_poster_urls
+from src.posters import (
+    _normalize_title,
+    get_poster_url,
+    get_poster_url_by_imdb_id,
+    get_poster_urls,
+    get_poster_urls_by_imdb_id,
+)
 
 
 class _FakeResponse:
@@ -113,3 +119,70 @@ class TestGetPosterUrls:
         assert call_count == 2  # one per unique title
         assert result["Toy Story (1995)"] == "https://image.tmdb.org/t/p/w342/x.jpg"
         assert result["Casablanca (1942)"] == "https://image.tmdb.org/t/p/w342/x.jpg"
+
+
+class TestGetPosterUrlByImdbId:
+    def test_no_api_key_returns_none_without_network_call(self, monkeypatch):
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("get_poster_url_by_imdb_id hit the network despite a missing api_key")
+
+        monkeypatch.setattr("src.posters.requests.get", _fail_if_called)
+
+        assert get_poster_url_by_imdb_id("tt5286444", api_key=None) is None
+
+    def test_returns_full_image_url_on_a_match(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.posters.requests.get",
+            lambda *a, **k: _FakeResponse({"movie_results": [{"poster_path": "/abc123.jpg"}], "tv_results": []}),
+        )
+
+        url = get_poster_url_by_imdb_id("tt5286444", api_key="fake-key")
+
+        assert url == "https://image.tmdb.org/t/p/w342/abc123.jpg"
+
+    def test_no_movie_results_returns_none(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.posters.requests.get", lambda *a, **k: _FakeResponse({"movie_results": [], "tv_results": []})
+        )
+
+        assert get_poster_url_by_imdb_id("tt0000000", api_key="fake-key") is None
+
+    def test_network_failure_returns_none_instead_of_raising(self, monkeypatch):
+        def _raise(*args, **kwargs):
+            raise requests.exceptions.ConnectionError("simulated network failure")
+
+        monkeypatch.setattr("src.posters.requests.get", _raise)
+
+        assert get_poster_url_by_imdb_id("tt5286444", api_key="fake-key") is None
+
+
+class TestGetPosterUrlsByImdbId:
+    def test_empty_input_returns_empty_dict_without_network_call(self, monkeypatch):
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("get_poster_urls_by_imdb_id hit the network for an empty id list")
+
+        monkeypatch.setattr("src.posters.requests.get", _fail_if_called)
+
+        assert get_poster_urls_by_imdb_id([], api_key="fake-key") == {}
+
+    def test_no_api_key_maps_every_id_to_none(self):
+        result = get_poster_urls_by_imdb_id(["tt5286444", "tt0034583"], api_key=None)
+
+        assert result == {"tt5286444": None, "tt0034583": None}
+
+    def test_duplicate_ids_are_looked_up_once_each(self, monkeypatch):
+        call_count = 0
+
+        def _get(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return _FakeResponse({"movie_results": [{"poster_path": "/x.jpg"}]})
+
+        monkeypatch.setattr("src.posters.requests.get", _get)
+
+        ids = ["tt5286444", "tt5286444", "tt0034583"]
+        result = get_poster_urls_by_imdb_id(ids, api_key="fake-key")
+
+        assert call_count == 2  # one per unique id
+        assert result["tt5286444"] == "https://image.tmdb.org/t/p/w342/x.jpg"
+        assert result["tt0034583"] == "https://image.tmdb.org/t/p/w342/x.jpg"

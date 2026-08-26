@@ -1,39 +1,73 @@
-"""Download, clean, and split the MovieLens 100K dataset.
+"""Download, clean, and split the Indian Regional Movie Dataset.
 
-Pipeline stages: :func:`download_movielens_100k` (cached download + extract)
--> :func:`load_ratings` / :func:`load_movies` / :func:`load_users` (parse
-the raw ``u.*`` files) -> :func:`merge_data` (join into one denormalized
-frame) -> :func:`chronological_train_test_split` (per-user, time-ordered
-split). :func:`run_pipeline` orchestrates all of the above and writes the
-processed CSVs to ``data/processed/``.
+Source: Agarwal et al., "Indian Regional Movie Dataset for Recommender
+Systems" (arXiv:1801.02203), mirrored on Kaggle as
+``snathjr/indian-regional-movie``. Unlike the MovieLens 100K dataset this
+pipeline originally used, there is no unauthenticated public URL for this
+data -- Kaggle gates every dataset download behind its API, so a Kaggle
+account and API token are required (see :func:`download_indian_movies_dataset`).
+
+Two structural differences from MovieLens drive most of the design choices
+below, and both are load-bearing enough to call out up front:
+
+1. **Ratings are a ternary preference signal (-1/0/1), not 1-5 stars.**
+   ``1`` = liked, ``0`` = disliked/not interested, ``-1`` = ambiguous/skipped.
+   This pipeline does not force that onto a fake 1-5 scale; ``src/models.py``
+   treats ``[-1, 1]`` as the native rating range, so RMSE/MAE here measure
+   preference-*score* prediction, not star-rating prediction.
+2. **No timestamp field exists**, so the chronological train/test split this
+   pipeline used for MovieLens isn't possible -- see
+   :func:`random_train_test_split` for the honest replacement.
+
+Pipeline stages: :func:`download_indian_movies_dataset` (cached download +
+extract) -> :func:`load_ratings` / :func:`load_movies` / :func:`load_users`
+(parse the raw files) -> :func:`merge_data` (join into one denormalized
+frame) -> :func:`random_train_test_split` (per-user split).
+:func:`run_pipeline` orchestrates all of the above, plus referential-integrity
+cleanup (dropping ratings that reference a user/movie that got filtered out
+elsewhere -- see its docstring), and writes the processed CSVs to
+``data/processed/``.
 
 Run standalone with ``python -m src.data_pipeline``.
 """
 
 from __future__ import annotations
 
-import zipfile
+import json
+import string
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-import requests
 
 from src.utils import PROCESSED_DATA_DIR, RAW_DATA_DIR, ensure_dir, get_logger
 
 logger = get_logger(__name__)
 
-MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
+KAGGLE_DATASET = "snathjr/indian-regional-movie"
 
+# The dataset's real, discovered genre vocabulary (21 genres; see claude.md
+# for how this was determined). Movies with no listed genre -- about a
+# quarter of the catalog -- get an all-zero vector across these columns
+# rather than a fabricated "unknown" placeholder.
 GENRE_COLUMNS: list[str] = [
-    "unknown", "Action", "Adventure", "Animation", "Children's", "Comedy",
-    "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror",
-    "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western",
+    "Action", "Adventure", "Animation", "Biography", "Comedy", "Crime",
+    "Drama", "Family", "Fantasy", "History", "Horror", "Music", "Musical",
+    "Mystery", "News", "Romance", "Sci-Fi", "Sport", "Thriller", "War", "Western",
 ]
-_MOVIE_COLUMNS: list[str] = [
-    "movie_id", "title", "release_date", "video_release_date", "imdb_url",
-] + GENRE_COLUMNS
-_USER_COLUMNS: list[str] = ["user_id", "age", "gender", "occupation", "zip_code"]
-_RATING_COLUMNS: list[str] = ["user_id", "movie_id", "rating", "timestamp"]
+
+# ratings.json encodes each vote as a string; anything outside this map is
+# logged and dropped rather than guessed at.
+_RATING_VALUE_MAP: dict[str, int] = {"1": 1, "0": 0, "-1": -1}
+
+_MIN_USER_ID_LENGTH = 3
+_JUNK_ALPHABET_RUN_MIN_LENGTH = 5
+
+# The dataset paper (Agarwal et al.) was submitted January 2018, so survey
+# responses were collected in 2017. "age" is therefore an approximate
+# as-of-2017 snapshot derived from date of birth, not a live age -- the
+# same static-snapshot convention MovieLens's own age field used.
+_SURVEY_COLLECTION_YEAR = 2017
 
 
 class DataPipelineError(Exception):
@@ -41,129 +75,228 @@ class DataPipelineError(Exception):
 
 
 class DataDownloadError(DataPipelineError):
-    """Raised when the MovieLens archive cannot be downloaded or extracted."""
+    """Raised when the dataset cannot be downloaded from Kaggle or extracted."""
 
 
 class DataFormatError(DataPipelineError):
-    """Raised when a raw MovieLens file is missing or fails to parse."""
+    """Raised when a raw dataset file is missing or fails to parse."""
 
 
-def download_movielens_100k(dest_dir: Path = RAW_DATA_DIR) -> Path:
-    """Download and extract the MovieLens 100K dataset, using a local cache.
+def download_indian_movies_dataset(dest_dir: Path = RAW_DATA_DIR) -> Path:
+    """Download and extract the Indian Regional Movie Dataset, using a local cache.
 
-    If ``dest_dir/ml-100k/u.data`` already exists, the download is skipped
-    entirely so repeated runs (including every Streamlit app launch) are
-    fast and don't hit the network.
+    Requires a Kaggle account and API token: either ``~/.kaggle/kaggle.json``
+    or the ``KAGGLE_USERNAME``/``KAGGLE_KEY`` environment variables. Get a
+    free token at https://www.kaggle.com/settings under "API".
+
+    If ``dest_dir/indian_movies/ratings.json`` already exists, the download
+    is skipped entirely so repeated runs (including every Streamlit app
+    launch) are fast and don't hit the network.
 
     Args:
-        dest_dir: Directory that will contain the extracted ``ml-100k``
-            folder. Created if it doesn't exist.
+        dest_dir: Directory that will contain the extracted dataset files.
 
     Returns:
-        Path to the extracted ``ml-100k`` directory.
+        Path to the directory containing ``movies.csv``, ``users.csv``, and
+        ``ratings.json``.
 
     Raises:
-        DataDownloadError: If the archive can't be downloaded, isn't a
-            valid zip file, or doesn't contain the expected contents.
+        DataDownloadError: If Kaggle credentials aren't configured, or the
+            dataset can't be downloaded or extracted.
     """
-    extracted_dir = dest_dir / "ml-100k"
-    if (extracted_dir / "u.data").exists():
-        logger.info("Using cached MovieLens 100K at %s", extracted_dir)
+    extracted_dir = dest_dir / "indian_movies"
+    if (extracted_dir / "ratings.json").exists():
+        logger.info("Using cached Indian movie dataset at %s", extracted_dir)
         return extracted_dir
 
-    ensure_dir(dest_dir)
-    zip_path = dest_dir / "ml-100k.zip"
+    ensure_dir(extracted_dir)
     try:
-        logger.info("Downloading MovieLens 100K from %s", MOVIELENS_URL)
-        response = requests.get(MOVIELENS_URL, timeout=60)
-        response.raise_for_status()
-        zip_path.write_bytes(response.content)
-    except requests.exceptions.RequestException as exc:
+        import kaggle  # local import: importing this module authenticates as a side effect
+
+        kaggle.api.authenticate()
+        logger.info("Downloading %s from Kaggle", KAGGLE_DATASET)
+        kaggle.api.dataset_download_files(KAGGLE_DATASET, path=str(extracted_dir), unzip=True)
+    except Exception as exc:  # noqa: BLE001 - the kaggle package doesn't expose a small, stable
+        # set of exception types across versions for "no credentials" vs. "network failure" vs.
+        # "dataset moved"; all three surface as generic exceptions, so this boundary is
+        # intentionally broad. What matters is that the resulting message stays actionable.
         raise DataDownloadError(
-            f"Failed to download MovieLens 100K from {MOVIELENS_URL}: {exc}"
+            f"Failed to download the Indian movie dataset ({KAGGLE_DATASET}) from Kaggle: {exc}. "
+            "Make sure a Kaggle API token is configured at ~/.kaggle/kaggle.json (or the "
+            "KAGGLE_USERNAME/KAGGLE_KEY env vars) -- get a free one at "
+            "https://www.kaggle.com/settings under 'API'."
         ) from exc
 
-    try:
-        with zipfile.ZipFile(zip_path) as archive:
-            archive.extractall(dest_dir)
-    except zipfile.BadZipFile as exc:
+    if not (extracted_dir / "ratings.json").exists():
         raise DataDownloadError(
-            f"Downloaded file at {zip_path} is not a valid zip archive: {exc}"
-        ) from exc
-    finally:
-        zip_path.unlink(missing_ok=True)
-
-    if not (extracted_dir / "u.data").exists():
-        raise DataDownloadError(
-            f"Extraction reported success but {extracted_dir / 'u.data'} is missing; "
-            "the MovieLens archive layout may have changed."
+            f"Download reported success but {extracted_dir / 'ratings.json'} is missing; "
+            "the dataset's file layout on Kaggle may have changed."
         )
-    logger.info("MovieLens 100K ready at %s", extracted_dir)
+    logger.info("Indian movie dataset ready at %s", extracted_dir)
     return extracted_dir
 
 
-def load_ratings(raw_dir: Path) -> pd.DataFrame:
-    """Parse ``u.data`` into a ratings frame.
-
-    Args:
-        raw_dir: Path to the extracted ``ml-100k`` directory.
-
-    Returns:
-        DataFrame with columns ``user_id``, ``movie_id``, ``rating``,
-        ``timestamp`` (Unix epoch seconds).
-
-    Raises:
-        DataFormatError: If the file is missing or fails to parse.
-    """
-    path = raw_dir / "u.data"
+def _parse_json_string_list(raw: str) -> list[str]:
+    """Parse a JSON-array-encoded CSV cell (e.g. ``'[ "Hindi" ]'``) into a list of strings."""
+    if not raw:
+        return []
     try:
-        return pd.read_csv(path, sep="\t", names=_RATING_COLUMNS, engine="python")
-    except (FileNotFoundError, pd.errors.ParserError) as exc:
-        raise DataFormatError(f"Failed to read ratings file {path}: {exc}") from exc
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
 
 
 def load_movies(raw_dir: Path) -> pd.DataFrame:
-    """Parse ``u.item`` into a movie metadata frame.
+    """Parse ``movies.csv`` into a movie metadata frame.
 
     Args:
-        raw_dir: Path to the extracted ``ml-100k`` directory.
+        raw_dir: Path to the extracted dataset directory.
 
     Returns:
-        DataFrame with ``movie_id``, ``title``, ``release_date``,
-        ``video_release_date``, ``imdb_url``, and one binary column per
-        genre in :data:`GENRE_COLUMNS`.
+        DataFrame with ``movie_id`` (the movie's IMDb ``tt`` id -- used
+        as-is rather than remapped to a synthetic integer, since every
+        model in ``src/models.py`` already treats ``movie_id`` as an
+        opaque, hashable key), ``title``, ``release_year``, ``imdb_rating``
+        (IMDb's own aggregate score, informational only -- not used by any
+        model), ``languages``, and one binary column per genre in
+        :data:`GENRE_COLUMNS`.
 
     Raises:
         DataFormatError: If the file is missing or fails to parse.
     """
-    path = raw_dir / "u.item"
+    path = raw_dir / "movies.csv"
     try:
-        # u.item is Latin-1 encoded (not UTF-8) in the original MovieLens release.
-        return pd.read_csv(
-            path, sep="|", names=_MOVIE_COLUMNS, encoding="latin-1", engine="python"
-        )
+        raw = pd.read_csv(path, dtype={"movie_id": str})
     except (FileNotFoundError, pd.errors.ParserError) as exc:
         raise DataFormatError(f"Failed to read movies file {path}: {exc}") from exc
 
+    movies = pd.DataFrame({"movie_id": raw["movie_id"]})
+    movies["title"] = raw["name"].fillna("").str.strip()
+    movies["release_year"] = pd.to_datetime(raw["released"], errors="coerce").dt.year
+    movies["imdb_rating"] = pd.to_numeric(raw["rating"], errors="coerce")
+    movies["languages"] = raw["language"].fillna("[]").apply(
+        lambda s: ", ".join(_parse_json_string_list(s))
+    )
+
+    genre_lists = raw["genre"].fillna("[]").apply(_parse_json_string_list)
+    for genre in GENRE_COLUMNS:
+        movies[genre] = genre_lists.apply(lambda genres, g=genre: int(g in genres))
+
+    return movies.drop_duplicates(subset="movie_id").reset_index(drop=True)
+
+
+def _is_junk_user_id(user_id: str) -> bool:
+    """Flag obvious survey test-submissions rather than real user handles.
+
+    Two patterns showed up in a manual inspection of the raw data: 1-2
+    character ids (``"n"``, ``"p"``) and a literal "ABCDEFGHI JKLM" -- someone
+    typing the alphabet into the form. Both are caught generically here
+    rather than as a hardcoded blocklist, since more of the same is likely
+    in the long tail.
+    """
+    if len(user_id) < _MIN_USER_ID_LENGTH:
+        return True
+    letters_only = "".join(ch.lower() for ch in user_id if ch.isalpha())
+    return (
+        len(letters_only) >= _JUNK_ALPHABET_RUN_MIN_LENGTH
+        and letters_only in string.ascii_lowercase
+    )
+
 
 def load_users(raw_dir: Path) -> pd.DataFrame:
-    """Parse ``u.user`` into a user demographics frame.
+    """Parse ``users.csv`` into a user demographics frame.
 
     Args:
-        raw_dir: Path to the extracted ``ml-100k`` directory.
+        raw_dir: Path to the extracted dataset directory.
 
     Returns:
-        DataFrame with ``user_id``, ``age``, ``gender``, ``occupation``,
-        ``zip_code``.
+        DataFrame with ``user_id``, ``age`` (approximate, see
+        :data:`_SURVEY_COLLECTION_YEAR`), ``gender``, ``occupation``, ``state``.
+        Rows with a junk/placeholder id (see :func:`_is_junk_user_id`) are
+        dropped, with the count logged.
 
     Raises:
         DataFormatError: If the file is missing or fails to parse.
     """
-    path = raw_dir / "u.user"
+    path = raw_dir / "users.csv"
     try:
-        return pd.read_csv(path, sep="|", names=_USER_COLUMNS, engine="python")
+        raw = pd.read_csv(path, dtype={"_id": str})
     except (FileNotFoundError, pd.errors.ParserError) as exc:
         raise DataFormatError(f"Failed to read users file {path}: {exc}") from exc
+
+    users = pd.DataFrame({"user_id": raw["_id"].fillna("").str.strip()})
+    n_before = len(users)
+    users = users[~users["user_id"].apply(_is_junk_user_id)].copy()
+    n_dropped = n_before - len(users)
+    if n_dropped:
+        logger.info("Dropped %d user row(s) with a junk/placeholder id (survey test submissions)", n_dropped)
+
+    raw = raw.loc[users.index]
+    birth_year = pd.to_datetime(raw["dob"], format="%d-%m-%Y", errors="coerce").dt.year
+    users["age"] = _SURVEY_COLLECTION_YEAR - birth_year
+    users["gender"] = raw["gender"].fillna("").replace("", "Unknown")
+    users["occupation"] = raw["job"].fillna("Unknown").replace("", "Unknown")
+    users["state"] = raw["state"].fillna("Unknown").replace("", "Unknown")
+
+    return users.drop_duplicates(subset="user_id").reset_index(drop=True)
+
+
+def load_ratings(raw_dir: Path) -> pd.DataFrame:
+    """Parse ``ratings.json`` into a ratings frame.
+
+    The file is mongoexport-style: one JSON object per line, each shaped
+    like ``{"_id": "<user_id>", "rated": {"<movie_id>": ["1"], ..., "submit":
+    ["submit"]}}``. The ``"submit"`` key is a form-submission artifact, not a
+    movie rating, and is dropped.
+
+    Args:
+        raw_dir: Path to the extracted dataset directory.
+
+    Returns:
+        DataFrame with ``user_id``, ``movie_id``, ``rating`` (int, one of
+        -1/0/1 -- see the module docstring for what these mean). No
+        timestamp column: this export doesn't carry one.
+
+    Raises:
+        DataFormatError: If the file is missing or fails to parse.
+    """
+    path = raw_dir / "ratings.json"
+    records: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise DataFormatError(f"Failed to read ratings file {path}: {exc}") from exc
+
+    rows: list[tuple[str, str, int]] = []
+    skipped_values = 0
+    for record in records:
+        user_id = str(record.get("_id", "")).strip()
+        if not user_id:
+            continue
+        for movie_id, value in record.get("rated", {}).items():
+            if movie_id == "submit":
+                continue
+            raw_value = value[0] if isinstance(value, list) else value
+            rating = _RATING_VALUE_MAP.get(str(raw_value))
+            if rating is None:
+                skipped_values += 1
+                continue
+            rows.append((user_id, movie_id, rating))
+
+    if skipped_values:
+        logger.warning(
+            "Skipped %d rating entr(y/ies) with an unrecognized value (expected one of -1/0/1)",
+            skipped_values,
+        )
+
+    return pd.DataFrame(rows, columns=["user_id", "movie_id", "rating"])
 
 
 def merge_data(
@@ -185,54 +318,58 @@ def merge_data(
     return merged
 
 
-def chronological_train_test_split(
-    ratings: pd.DataFrame, test_frac: float = 0.2, min_ratings_for_test: int = 5
+def random_train_test_split(
+    ratings: pd.DataFrame,
+    test_frac: float = 0.2,
+    min_ratings_for_test: int = 5,
+    random_state: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split ratings into train/test sets chronologically, per user.
+    """Split ratings into train/test sets randomly, per user.
 
-    Design decision: this pipeline uses a **per-user chronological split**
-    rather than a random/stratified split. A random split lets the model
-    train on a user's *later* ratings to predict their *earlier* ones,
-    which the model could never actually observe at serving time — that's
-    label leakage disguised as good accuracy. A chronological split
-    reproduces the real deployment condition (predict future ratings from
-    past ones), so the reported metrics are honest about how the system
-    would perform in production, at the cost of being slightly less
-    standard for apples-to-apples benchmarking against papers that use a
-    random split.
+    Design decision: this dataset carries no timestamp (see
+    :func:`load_ratings`), so the per-user *chronological* split this
+    pipeline used against MovieLens -- reproducing the real deployment
+    condition of predicting future ratings from past ones -- isn't possible
+    here. A per-user **random** split is the honest next-best option: it
+    still avoids the failure mode where a global (non-per-user) split would
+    leave some users entirely out of train or entirely out of test, which
+    would make per-user ranking metrics (Precision@K, Recall@K, NDCG@K)
+    impossible to compute for them. What it can't reproduce is the
+    "no peeking at the future" guarantee a timestamp would have given, so
+    the metrics from this split are directly comparable to the MovieLens
+    version's *ranking* story but not to its "honest production simulation"
+    framing.
 
-    The split is done per user (not on the global timeline) so that every
-    active user contributes to both sets — a global timeline split would
-    put all of one user's ratings entirely in train or entirely in test
-    whenever their activity clusters in time, making per-user ranking
-    metrics (Precision@K, Recall@K, NDCG@K) impossible to compute for many
-    users. Users with fewer than ``min_ratings_for_test`` ratings are kept
-    entirely in train, since holding out a test point for them would leave
-    too little signal to predict from and is exactly the cold-start
-    scenario handled separately by the cold-start fallback.
+    Users with fewer than ``min_ratings_for_test`` ratings are kept entirely
+    in train, matching the same cold-start rationale as before: holding out
+    a test point for them would leave too little signal to predict from,
+    and that's exactly the scenario the cold-start fallback handles.
 
     Args:
-        ratings: Ratings frame with ``user_id`` and ``timestamp`` columns.
-        test_frac: Fraction of each eligible user's most recent ratings to
-            hold out for testing. Defaults to 0.2.
-        min_ratings_for_test: Minimum number of ratings a user must have
-            before any of their ratings are held out for test. Defaults to 5.
+        ratings: Ratings frame with a ``user_id`` column.
+        test_frac: Fraction of each eligible user's ratings to hold out.
+        min_ratings_for_test: Minimum ratings a user must have before any
+            of theirs are held out for test.
+        random_state: Seed for the per-user shuffle, for reproducibility.
 
     Returns:
         ``(train_df, test_df)`` tuple of DataFrames with the same columns
         as ``ratings``.
     """
+    rng = np.random.default_rng(random_state)
     train_parts: list[pd.DataFrame] = []
     test_parts: list[pd.DataFrame] = []
 
     for _, group in ratings.groupby("user_id", sort=False):
-        ordered = group.sort_values("timestamp", kind="mergesort")
-        n_test = int(len(ordered) * test_frac) if len(ordered) >= min_ratings_for_test else 0
+        n_test = int(len(group) * test_frac) if len(group) >= min_ratings_for_test else 0
         if n_test == 0:
-            train_parts.append(ordered)
-        else:
-            train_parts.append(ordered.iloc[:-n_test])
-            test_parts.append(ordered.iloc[-n_test:])
+            train_parts.append(group)
+            continue
+        shuffled_positions = rng.permutation(len(group))
+        test_df_positions = shuffled_positions[:n_test]
+        train_df_positions = shuffled_positions[n_test:]
+        train_parts.append(group.iloc[train_df_positions])
+        test_parts.append(group.iloc[test_df_positions])
 
     train_df = pd.concat(train_parts, ignore_index=True) if train_parts else ratings.iloc[0:0]
     test_df = pd.concat(test_parts, ignore_index=True) if test_parts else ratings.iloc[0:0]
@@ -244,14 +381,14 @@ def run_pipeline(
     processed_dir: Path = PROCESSED_DATA_DIR,
     force: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    """Run the full pipeline: download, load, merge, split, and persist.
+    """Run the full pipeline: download, load, clean, split, and persist.
 
     Idempotent: if the processed CSVs already exist and ``force`` is
     ``False``, they are loaded from disk instead of being recomputed. This
     is what lets ``app.py`` call this on every Streamlit launch cheaply.
 
     Args:
-        raw_dir: Directory for the raw/cached MovieLens download.
+        raw_dir: Directory for the raw/cached dataset download.
         processed_dir: Directory to write/read processed CSVs.
         force: If True, re-run and overwrite even if processed files exist.
 
@@ -268,20 +405,35 @@ def run_pipeline(
 
     if not force and all(p.exists() for p in paths.values()):
         logger.info("Loading cached processed data from %s", processed_dir)
-        return {name: pd.read_csv(p) for name, p in paths.items()}
+        return {
+            name: pd.read_csv(p, dtype={"user_id": str, "movie_id": str})
+            for name, p in paths.items()
+        }
 
-    raw_dir_path = download_movielens_100k(raw_dir)
+    raw_dir_path = download_indian_movies_dataset(raw_dir)
     ratings = load_ratings(raw_dir_path)
     movies = load_movies(raw_dir_path)
     users = load_users(raw_dir_path)
     logger.info(
-        "Loaded %d ratings, %d movies, %d users", len(ratings), len(movies), len(users)
+        "Loaded %d ratings, %d movies, %d users (before referential-integrity cleanup)",
+        len(ratings), len(movies), len(users),
     )
 
-    train_df, test_df = chronological_train_test_split(ratings)
+    n_before = len(ratings)
+    ratings = ratings[
+        ratings["movie_id"].isin(set(movies["movie_id"])) & ratings["user_id"].isin(set(users["user_id"]))
+    ].reset_index(drop=True)
+    if len(ratings) != n_before:
+        logger.info(
+            "Dropped %d rating(s) referencing a movie/user missing from movies.csv/users.csv "
+            "after cleanup (e.g. a junk user id)",
+            n_before - len(ratings),
+        )
+
+    train_df, test_df = random_train_test_split(ratings)
     logger.info(
-        "Chronological per-user split: %d train ratings, %d test ratings (%.1f%% held out)",
-        len(train_df), len(test_df), 100 * len(test_df) / len(ratings),
+        "Random per-user split: %d train ratings, %d test ratings (%.1f%% held out)",
+        len(train_df), len(test_df), 100 * len(test_df) / len(ratings) if len(ratings) else 0.0,
     )
 
     train_df.to_csv(paths["train"], index=False)

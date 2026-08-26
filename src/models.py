@@ -23,8 +23,13 @@ from src.utils import get_logger
 
 logger = get_logger(__name__)
 
-RATING_MIN = 1.0
-RATING_MAX = 5.0
+# The Indian Regional Movie Dataset's ratings are a ternary preference signal
+# (-1 = ambiguous/skipped, 0 = disliked, 1 = liked), not 1-5 stars -- see
+# src/data_pipeline.py's module docstring. Every model below is written in
+# terms of these two constants rather than a hardcoded range, so this is the
+# only place that scale is defined.
+RATING_MIN = -1.0
+RATING_MAX = 1.0
 
 
 @dataclass(frozen=True)
@@ -32,18 +37,18 @@ class Recommendation:
     """A single ranked recommendation.
 
     Attributes:
-        movie_id: The recommended movie's ID.
+        movie_id: The recommended movie's IMDb ``tt`` id.
         score: Model-internal score used to rank this item. Scale varies
             by source (content/hybrid scores are similarities in roughly
-            [0, 1]; SVD scores are predicted ratings in [1, 5]) -- compare
-            scores only within the same source.
+            [0, 1]; SVD scores are predicted preference in [-1, 1]) --
+            compare scores only within the same source.
         source: Which code path produced this item: ``"content"``,
             ``"svd"``, ``"hybrid"``, or ``"cold_start"``. Surfaced in the
             Streamlit app so a reviewer can see which model actually
             served each result.
     """
 
-    movie_id: int
+    movie_id: str
     score: float
     source: str
 
@@ -62,12 +67,12 @@ class BaseRecommender(ABC):
         """
 
     @abstractmethod
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         """Predict a single user's rating for a single movie.
 
         Args:
             user_id: Raw user ID.
-            movie_id: Raw movie ID.
+            movie_id: Raw movie ID (IMDb ``tt`` id).
 
         Returns:
             Predicted rating, clipped to ``[RATING_MIN, RATING_MAX]``.
@@ -75,7 +80,7 @@ class BaseRecommender(ABC):
 
     @abstractmethod
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         """Return the top-``n`` recommended movies for a user.
 
@@ -93,26 +98,29 @@ class BaseRecommender(ABC):
 class ContentBasedRecommender(BaseRecommender):
     """Genre-based content filtering via cosine similarity.
 
-    MovieLens 100K has no plot synopsis or free-text overview field, so
-    the only substantive content signal available is each movie's genre
-    one-hot vector (19 genres). This model builds a per-user "taste
-    profile" as the rating-weighted sum of the genre vectors of movies the
-    user has rated, then ranks unseen movies by cosine similarity to that
-    profile. This is deliberately simple (no TF-IDF over a text corpus
-    that doesn't exist in this dataset) but is a fast, legitimate
-    content-based signal that is completely independent of collaborative
-    (rating-matrix) structure -- which is exactly what makes it useful to
-    combine with SVD in :class:`HybridRecommender`.
+    The Indian Regional Movie Dataset has no plot synopsis or free-text
+    overview field, so the only substantive content signal available is
+    each movie's genre one-hot vector (21 genres -- see
+    ``src/data_pipeline.py``'s ``GENRE_COLUMNS``; roughly a quarter of the
+    catalog has no listed genre at all and gets an all-zero vector). This
+    model builds a per-user "taste profile" as the rating-weighted sum of
+    the genre vectors of movies the user has rated, then ranks unseen
+    movies by cosine similarity to that profile. This is deliberately
+    simple (no TF-IDF over a text corpus that doesn't exist in this
+    dataset) but is a fast, legitimate content-based signal that is
+    completely independent of collaborative (rating-matrix) structure --
+    which is exactly what makes it useful to combine with SVD in
+    :class:`HybridRecommender`.
     """
 
     def __init__(self, genre_columns: list[str] | None = None) -> None:
         self._genre_columns = genre_columns or GENRE_COLUMNS
         self._movie_ids: np.ndarray | None = None
         self._genre_matrix: np.ndarray | None = None
-        self._movie_id_to_idx: dict[int, int] = {}
+        self._movie_id_to_idx: dict[str, int] = {}
         self._item_similarity: np.ndarray | None = None
-        self._user_profiles: dict[int, np.ndarray] = {}
-        self._seen: dict[int, set[int]] = {}
+        self._user_profiles: dict[str, np.ndarray] = {}
+        self._seen: dict[str, set[str]] = {}
 
     def fit(self, train_df: pd.DataFrame, movies_df: pd.DataFrame) -> None:
         self._movie_ids = movies_df["movie_id"].to_numpy()
@@ -137,7 +145,7 @@ class ContentBasedRecommender(BaseRecommender):
             len(self._user_profiles), len(self._movie_ids),
         )
 
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         profile = self._user_profiles.get(user_id)
         idx = self._movie_id_to_idx.get(movie_id)
         if profile is None or idx is None or self._genre_matrix is None:
@@ -149,7 +157,7 @@ class ContentBasedRecommender(BaseRecommender):
         return RATING_MIN + similarity * (RATING_MAX - RATING_MIN)
 
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         profile = self._user_profiles.get(user_id)
         if profile is None or self._genre_matrix is None or self._movie_ids is None:
@@ -164,7 +172,7 @@ class ContentBasedRecommender(BaseRecommender):
         ranked_idx = np.argsort(-sims)
         results: list[Recommendation] = []
         for idx in ranked_idx:
-            mid = int(self._movie_ids[idx])
+            mid = str(self._movie_ids[idx])
             if mid in seen:
                 continue
             results.append(Recommendation(movie_id=mid, score=float(sims[idx]), source="content"))
@@ -172,7 +180,7 @@ class ContentBasedRecommender(BaseRecommender):
                 break
         return results
 
-    def similar_items(self, movie_id: int, n: int = 10) -> list[Recommendation]:
+    def similar_items(self, movie_id: str, n: int = 10) -> list[Recommendation]:
         """Return the ``n`` movies most similar to ``movie_id`` by genre.
 
         Bonus "more like this" lookup, independent of any user -- handy
@@ -194,7 +202,7 @@ class ContentBasedRecommender(BaseRecommender):
         for i in ranked_idx:
             if i == idx:
                 continue
-            results.append(Recommendation(movie_id=int(self._movie_ids[i]), score=float(sims[i]), source="content"))
+            results.append(Recommendation(movie_id=str(self._movie_ids[i]), score=float(sims[i]), source="content"))
             if len(results) >= n:
                 break
         return results
@@ -231,15 +239,15 @@ class SVDRecommender(BaseRecommender):
         self.regularization = regularization
         self.random_state = random_state
 
-        self._user_id_to_idx: dict[int, int] = {}
-        self._item_id_to_idx: dict[int, int] = {}
+        self._user_id_to_idx: dict[str, int] = {}
+        self._item_id_to_idx: dict[str, int] = {}
         self._item_ids: np.ndarray | None = None
         self._P: np.ndarray | None = None
         self._Q: np.ndarray | None = None
         self._b_u: np.ndarray | None = None
         self._b_i: np.ndarray | None = None
         self._global_mean: float = (RATING_MIN + RATING_MAX) / 2
-        self._seen: dict[int, set[int]] = {}
+        self._seen: dict[str, set[str]] = {}
 
     def fit(self, train_df: pd.DataFrame, movies_df: pd.DataFrame | None = None) -> None:
         user_ids = train_df["user_id"].unique()
@@ -288,7 +296,7 @@ class SVDRecommender(BaseRecommender):
             "SVDRecommender fit: %d users, %d items, %d factors", n_users, n_items, self.n_factors
         )
 
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         u = self._user_id_to_idx.get(user_id)
         i = self._item_id_to_idx.get(movie_id)
         if self._b_u is None or self._b_i is None or self._P is None or self._Q is None:
@@ -304,7 +312,7 @@ class SVDRecommender(BaseRecommender):
         return float(np.clip(pred, RATING_MIN, RATING_MAX))
 
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         u = self._user_id_to_idx.get(user_id)
         if u is None or self._item_ids is None or self._b_i is None or self._Q is None or self._b_u is None:
@@ -314,7 +322,7 @@ class SVDRecommender(BaseRecommender):
         ranked_idx = np.argsort(-scores)
         results: list[Recommendation] = []
         for idx in ranked_idx:
-            mid = int(self._item_ids[idx])
+            mid = str(self._item_ids[idx])
             if mid in seen:
                 continue
             score = float(np.clip(scores[idx], RATING_MIN, RATING_MAX))
@@ -329,9 +337,10 @@ class PopularityRecommender(BaseRecommender):
 
     Ranks movies by a Bayesian-averaged "weighted rating" (the classic
     IMDB formula: ``WR = v/(v+m)*R + m/(v+m)*C``) rather than the raw mean
-    rating, so a movie with 2 five-star ratings doesn't outrank one with
-    200 ratings averaging 4.5. Raw means are extremely noisy for low-count
-    items, which is exactly the regime cold-start fallbacks operate in.
+    rating, so a movie with 2 enthusiastic ratings doesn't outrank one with
+    200 ratings that are solidly positive on average. Raw means are
+    extremely noisy for low-count items, which is exactly the regime
+    cold-start fallbacks operate in.
     """
 
     def __init__(self, min_votes_quantile: float = 0.6) -> None:
@@ -340,8 +349,8 @@ class PopularityRecommender(BaseRecommender):
         self._movie_stats: pd.DataFrame | None = None
         self._genre_columns: list[str] = []
         self._genre_matrix: np.ndarray | None = None
-        self._movie_id_to_idx: dict[int, int] = {}
-        self._seen: dict[int, set[int]] = {}
+        self._movie_id_to_idx: dict[str, int] = {}
+        self._seen: dict[str, set[str]] = {}
 
     def fit(self, train_df: pd.DataFrame, movies_df: pd.DataFrame) -> None:
         self._genre_columns = [c for c in GENRE_COLUMNS if c in movies_df.columns]
@@ -368,7 +377,7 @@ class PopularityRecommender(BaseRecommender):
         self._seen = {uid: set(g["movie_id"]) for uid, g in train_df.groupby("user_id")}
         logger.info("PopularityRecommender fit on %d movies (min-votes prior m=%.1f)", len(movie_stats), m)
 
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         if self._movie_stats is None:
             return self._global_mean
         idx = self._movie_id_to_idx.get(movie_id)
@@ -377,7 +386,7 @@ class PopularityRecommender(BaseRecommender):
         return float(self._movie_stats.iloc[idx]["weighted_rating"])
 
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         return self.recommend_for_genre_profile(
             genre_weights=None, user_id=user_id, n=n, exclude_seen=exclude_seen
@@ -386,7 +395,7 @@ class PopularityRecommender(BaseRecommender):
     def recommend_for_genre_profile(
         self,
         genre_weights: np.ndarray | None,
-        user_id: int | None = None,
+        user_id: str | None = None,
         n: int = 10,
         exclude_seen: bool = True,
     ) -> list[Recommendation]:
@@ -429,7 +438,7 @@ class PopularityRecommender(BaseRecommender):
         ranked_idx = np.argsort(-scores)
         results: list[Recommendation] = []
         for idx in ranked_idx:
-            mid = int(movie_ids[idx])
+            mid = str(movie_ids[idx])
             if mid in seen:
                 continue
             results.append(Recommendation(movie_id=mid, score=float(scores[idx]), source="cold_start"))
@@ -475,7 +484,7 @@ class HybridRecommender(BaseRecommender):
         self.strategy = strategy
         self.alpha = alpha
         self.min_ratings_for_svd = min_ratings_for_svd
-        self._user_rating_counts: dict[int, int] = {}
+        self._user_rating_counts: dict[str, int] = {}
         self._movie_ids: np.ndarray | None = None
 
     def fit(self, train_df: pd.DataFrame, movies_df: pd.DataFrame) -> None:
@@ -485,7 +494,7 @@ class HybridRecommender(BaseRecommender):
         self._movie_ids = movies_df["movie_id"].to_numpy()
         logger.info("HybridRecommender fit (strategy=%s, alpha=%.2f)", self.strategy, self.alpha)
 
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         if self.strategy == "switching":
             if self._user_rating_counts.get(user_id, 0) < self.min_ratings_for_svd:
                 return self.content_model.predict(user_id, movie_id)
@@ -497,7 +506,7 @@ class HybridRecommender(BaseRecommender):
         return float(np.clip(blended, RATING_MIN, RATING_MAX))
 
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         if self.strategy == "switching":
             if self._user_rating_counts.get(user_id, 0) < self.min_ratings_for_svd:
@@ -531,11 +540,11 @@ class HybridRecommender(BaseRecommender):
         return [Recommendation(movie_id=mid, score=score, source="hybrid") for mid, score in ranked]
 
 
-def _min_max_normalize(scores: dict[int, float]) -> dict[int, float]:
+def _min_max_normalize(scores: dict[str, float]) -> dict[str, float]:
     """Min-max normalize a score dict to [0, 1].
 
-    Used to put content similarity (~[0, 1]) and SVD predicted ratings
-    (~[1, 5]) on a comparable scale before blending in
+    Used to put content similarity (~[0, 1]) and SVD predicted preference
+    (~[-1, 1]) on a comparable scale before blending in
     :meth:`HybridRecommender.recommend_for_user`.
     """
     if not scores:
@@ -572,12 +581,12 @@ class ColdStartRecommender(BaseRecommender):
         self.base_model = base_model
         self.popularity_model = popularity_model
         self.min_user_ratings = min_user_ratings
-        self._user_rating_counts: dict[int, int] = {}
-        self._item_rating_counts: dict[int, int] = {}
+        self._user_rating_counts: dict[str, int] = {}
+        self._item_rating_counts: dict[str, int] = {}
         self._genre_columns: list[str] = []
         self._genre_matrix: np.ndarray | None = None
-        self._movie_id_to_idx: dict[int, int] = {}
-        self._user_ratings: dict[int, pd.DataFrame] = {}
+        self._movie_id_to_idx: dict[str, int] = {}
+        self._user_ratings: dict[str, pd.DataFrame] = {}
 
     def fit(self, train_df: pd.DataFrame, movies_df: pd.DataFrame) -> None:
         self.base_model.fit(train_df, movies_df)
@@ -590,13 +599,13 @@ class ColdStartRecommender(BaseRecommender):
         self._user_ratings = dict(tuple(train_df.groupby("user_id")))
         logger.info("ColdStartRecommender fit (min_user_ratings=%d)", self.min_user_ratings)
 
-    def _is_cold_user(self, user_id: int) -> bool:
+    def _is_cold_user(self, user_id: str) -> bool:
         return self._user_rating_counts.get(user_id, 0) < self.min_user_ratings
 
-    def _is_cold_item(self, movie_id: int) -> bool:
+    def _is_cold_item(self, movie_id: str) -> bool:
         return self._item_rating_counts.get(movie_id, 0) == 0
 
-    def _genre_profile_for_user(self, user_id: int) -> np.ndarray | None:
+    def _genre_profile_for_user(self, user_id: str) -> np.ndarray | None:
         group = self._user_ratings.get(user_id)
         if group is None or len(group) == 0 or self._genre_matrix is None:
             return None
@@ -607,13 +616,13 @@ class ColdStartRecommender(BaseRecommender):
         weights = group.loc[mask, "rating"].to_numpy(dtype=float)
         return (self._genre_matrix[idxs] * weights[:, None]).sum(axis=0)
 
-    def predict(self, user_id: int, movie_id: int) -> float:
+    def predict(self, user_id: str, movie_id: str) -> float:
         if self._is_cold_item(movie_id) or self._is_cold_user(user_id):
             return self.popularity_model.predict(user_id, movie_id)
         return self.base_model.predict(user_id, movie_id)
 
     def recommend_for_user(
-        self, user_id: int, n: int = 10, exclude_seen: bool = True
+        self, user_id: str, n: int = 10, exclude_seen: bool = True
     ) -> list[Recommendation]:
         if self._is_cold_user(user_id):
             genre_profile = self._genre_profile_for_user(user_id)

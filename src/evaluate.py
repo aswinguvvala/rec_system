@@ -32,7 +32,10 @@ from src.utils import RESULTS_DIR, ensure_dir, get_logger
 logger = get_logger(__name__)
 
 DEFAULT_K_VALUES: tuple[int, ...] = (5, 10)
-DEFAULT_RELEVANCE_THRESHOLD = 4.0
+# The Indian Regional Movie Dataset's ratings are ternary (-1/0/1, see
+# src/data_pipeline.py), not 1-5 stars -- "relevant" means the user
+# explicitly marked the movie liked (rating == 1).
+DEFAULT_RELEVANCE_THRESHOLD = 1.0
 
 
 class EvaluationError(Exception):
@@ -69,7 +72,7 @@ def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs(y_true - y_pred)))
 
 
-def precision_at_k(recommended: Sequence[int], relevant: set[int], k: int) -> float:
+def precision_at_k(recommended: Sequence[str], relevant: set[str], k: int) -> float:
     """Fraction of the top-``k`` recommendations that are relevant.
 
     If fewer than ``k`` items were recommended, the denominator is the
@@ -91,7 +94,7 @@ def precision_at_k(recommended: Sequence[int], relevant: set[int], k: int) -> fl
     return hits / len(top_k)
 
 
-def recall_at_k(recommended: Sequence[int], relevant: set[int], k: int) -> float:
+def recall_at_k(recommended: Sequence[str], relevant: set[str], k: int) -> float:
     """Fraction of all relevant items captured in the top-``k`` recommendations.
 
     Args:
@@ -109,7 +112,7 @@ def recall_at_k(recommended: Sequence[int], relevant: set[int], k: int) -> float
     return hits / len(relevant)
 
 
-def ndcg_at_k(recommended: Sequence[int], relevant: set[int], k: int) -> float:
+def ndcg_at_k(recommended: Sequence[str], relevant: set[str], k: int) -> float:
     """Normalized Discounted Cumulative Gain at K, with binary relevance.
 
     Rewards relevant items appearing earlier in the ranking: a hit at

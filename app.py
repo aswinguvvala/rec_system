@@ -2,9 +2,11 @@
 
 Run with ``streamlit run app.py``. On a completely fresh clone (empty
 ``data/``), the first load triggers the full pipeline automatically --
-download MovieLens 100K, clean it, split it, and train all five models --
-so there is no manual data-prep step. Subsequent loads reuse Streamlit's
-cache and the pipeline's own on-disk cache, so they're fast.
+download the Indian Regional Movie Dataset via the Kaggle API, clean it,
+split it, and train all five models -- so there is no manual data-prep
+step beyond configuring a Kaggle API token (see README). Subsequent loads
+reuse Streamlit's cache and the pipeline's own on-disk cache, so they're
+fast.
 
 Poster images are optional, best-effort enrichment from TMDb (see
 ``src/posters.py``) -- the app runs fine with no ``TMDB_API_KEY``
@@ -34,12 +36,13 @@ from src.models import (
     Recommendation,
     SVDRecommender,
 )
-from src.posters import get_poster_urls
+from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
 
 st.set_page_config(page_title="Hybrid Movie Recommender", page_icon="\U0001f3ac", layout="wide")
 
-COLD_START_USER_ID = -1  # Sentinel: guaranteed absent from MovieLens 100K (real IDs are 1-943).
+# Sentinel guaranteed absent from this dataset's real (free-text, human-typed) user ids.
+COLD_START_USER_ID = "__simulated_new_user__"
 
 # label, emoji, accent color (used for both the CSS badge class and the compact dot).
 SOURCE_META: dict[str, tuple[str, str, str]] = {
@@ -220,7 +223,7 @@ html, body, [class*="css"] { font-family: var(--font-body); }
 """
 
 
-@st.cache_data(show_spinner="Loading MovieLens 100K (first run downloads ~5MB and processes it)...")
+@st.cache_data(show_spinner="Loading the Indian Regional Movie Dataset (first run downloads it via the Kaggle API)...")
 def load_data() -> dict[str, pd.DataFrame]:
     return run_pipeline()
 
@@ -275,8 +278,11 @@ def get_tmdb_api_key() -> str | None:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def load_posters(titles: tuple[str, ...], api_key: str | None) -> dict[str, str | None]:
-    return get_poster_urls(titles, api_key)
+def load_posters(movie_ids: tuple[str, ...], api_key: str | None) -> dict[str, str | None]:
+    # movie_id is the movie's real IMDb tt id in this dataset, so an exact
+    # find-by-id lookup is used instead of the fuzzy title search src/posters.py
+    # also offers -- see claude.md's Phase 7 notes.
+    return get_poster_urls_by_imdb_id(movie_ids, api_key)
 
 
 def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str | None, *, compact: bool = False) -> str:
@@ -310,7 +316,7 @@ def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str
 
 def render_recommendations(
     recs: list[Recommendation],
-    movie_id_to_title: dict[int, str],
+    movie_id_to_title: dict[str, str],
     poster_map: dict[str, str | None],
     container,
     *,
@@ -323,8 +329,8 @@ def render_recommendations(
         return
     cards = []
     for rank, rec in enumerate(recs, start=1):
-        title = movie_id_to_title.get(rec.movie_id, f"Movie #{rec.movie_id}")
-        poster_url = poster_map.get(title)
+        title = movie_id_to_title.get(rec.movie_id, f"Movie {rec.movie_id}")
+        poster_url = poster_map.get(rec.movie_id)
         cards.append(_movie_card_html(rank, title, rec, poster_url, compact=compact))
     wrapper_class = "movie-list--compact" if compact else "movie-grid"
     container.markdown(f'<div class="{wrapper_class}">{"".join(cards)}</div>', unsafe_allow_html=True)
@@ -335,7 +341,7 @@ st.markdown(CINEMA_CSS, unsafe_allow_html=True)
 try:
     data = load_data()
 except DataPipelineError as exc:
-    st.error(f"Failed to prepare MovieLens data: {exc}")
+    st.error(f"Failed to prepare the movie dataset: {exc}")
     st.stop()
 
 try:
@@ -345,13 +351,13 @@ except Exception as exc:  # noqa: BLE001 - top-level UI boundary, must not crash
     st.stop()
 
 train_df, movies_df, users_df = data["train"], data["movies"], data["users"]
-movie_id_to_title: dict[int, str] = dict(zip(movies_df["movie_id"], movies_df["title"]))
+movie_id_to_title: dict[str, str] = dict(zip(movies_df["movie_id"], movies_df["title"]))
 tmdb_api_key = get_tmdb_api_key()
 
 st.markdown(
     """
 <div class="hero">
-  <div class="hero-eyebrow">MovieLens 100K &middot; Content-Based + SVD + Hybrid</div>
+  <div class="hero-eyebrow">Indian Regional Movie Dataset &middot; Content-Based + SVD + Hybrid</div>
   <h1 class="hero-title">\U0001f3ac Hybrid Movie<br>Recommendation System</h1>
   <p class="hero-tagline">Content-based genre similarity and a from-scratch SVD collaborative filter,
   combined by a weighted hybrid, with an explicit cold-start fallback for new users and unrated movies.</p>
@@ -372,7 +378,7 @@ with st.sidebar:
         "Simulate a brand-new user (cold start)",
         value=False,
         help=(
-            "Every real user in MovieLens 100K already has 20+ ratings by construction, "
+            "Every real user in this dataset already has training ratings by construction, "
             "so this is the only way to see the cold-start path trigger live."
         ),
     )
@@ -385,7 +391,7 @@ with st.sidebar:
         selected_user_id = st.selectbox(
             "Pick a user",
             user_ids,
-            format_func=lambda uid: f"User {uid} ({rating_counts.get(uid, 0)} ratings)",
+            format_func=lambda uid: f"{uid} ({rating_counts.get(uid, 0)} ratings)",
         )
         user_row = users_df.loc[users_df["user_id"] == selected_user_id]
         if not user_row.empty:
@@ -395,7 +401,7 @@ with st.sidebar:
     n_recs = st.slider("Number of recommendations", min_value=5, max_value=20, value=10)
     compare_mode = st.checkbox("Compare recommenders side-by-side", value=False)
 
-user_label = f"User {selected_user_id}" + (" (simulated new user)" if simulate_cold else "")
+user_label = "a simulated new user" if simulate_cold else f"User {selected_user_id}"
 
 if compare_mode:
     st.subheader(f"Side-by-side comparison for {user_label}")
@@ -411,12 +417,8 @@ if compare_mode:
         ("popularity", "Popularity Baseline \U0001f4ca"),
     ]
     panel_recs = {key: models[key].recommend_for_user(selected_user_id, n=n_recs) for key, _ in panel_order}
-    needed_titles = {
-        movie_id_to_title.get(rec.movie_id, f"Movie #{rec.movie_id}")
-        for recs in panel_recs.values()
-        for rec in recs
-    }
-    poster_map = load_posters(tuple(sorted(needed_titles)), tmdb_api_key)
+    needed_movie_ids = {rec.movie_id for recs in panel_recs.values() for rec in recs}
+    poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
 
     columns = st.columns(4)
     for col, (model_key, title) in zip(columns, panel_order):
@@ -432,8 +434,8 @@ if compare_mode:
 else:
     st.subheader(f"Top {n_recs} recommendations for {user_label}")
     recs = models["cold_start"].recommend_for_user(selected_user_id, n=n_recs)
-    needed_titles = {movie_id_to_title.get(rec.movie_id, f"Movie #{rec.movie_id}") for rec in recs}
-    poster_map = load_posters(tuple(sorted(needed_titles)), tmdb_api_key)
+    needed_movie_ids = {rec.movie_id for rec in recs}
+    poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
     render_recommendations(recs, movie_id_to_title, poster_map, st)
 
 st.divider()
@@ -442,9 +444,10 @@ metrics_df = load_metrics_table()
 if metrics_df is not None:
     st.dataframe(metrics_df, width="stretch")
     st.caption(
-        "RMSE/MAE: rating-prediction error, lower is better. Precision/Recall/NDCG@K: ranking quality "
-        "against the full 1,682-movie catalog (no negative sampling), higher is better. Computed on a "
-        "per-user chronological train/test split -- see claude.md for why."
+        "RMSE/MAE: preference-score prediction error on this dataset's [-1, 1] scale, lower is better. "
+        "Precision/Recall/NDCG@K: ranking quality against the full movie catalog (no negative sampling), "
+        "higher is better, computed on a per-user random train/test split -- see claude.md for why "
+        "random rather than chronological (this dataset has no timestamps)."
     )
 else:
     st.info("Run `python -m src.evaluate` to generate results/metrics.json and see real metrics here.")

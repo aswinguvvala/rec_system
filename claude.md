@@ -1,20 +1,22 @@
 # CLAUDE.md
 
 ## Project
-Hybrid Movie Recommendation System — a portfolio project demonstrating production ML engineering practices: a real data pipeline, hybrid content-based + SVD collaborative filtering, proper ranking/rating evaluation, cold-start handling, and a deployed live demo. Primary audience: technical recruiters and hiring managers reviewing the GitHub repo and the live demo link.
+Hybrid Movie Recommendation System — a portfolio project demonstrating production ML engineering practices: a real data pipeline, hybrid content-based + SVD collaborative filtering, proper ranking/rating evaluation, cold-start handling, and a deployed live demo. Primary audience: technical recruiters and hiring managers reviewing the GitHub repo and the live demo link. As of Phase 7, built on the **Indian Regional Movie Dataset** (real per-user ratings across Indian regional cinema), not MovieLens -- see that phase's notes for why and what changed. Earlier phase notes below describe the original MovieLens-based build; superseded but left for history per this file's own convention.
 
 ## Stack
 - Python 3.12 (3.11 unavailable on dev machine; all deps fully support 3.12)
-- pandas==2.2.3, numpy==2.5.1, scikit-learn==1.9.0, scipy==1.18.0 (see `requirements.txt`)
+- pandas==2.2.3, numpy==2.5.1, scikit-learn==1.9.0, scipy==1.18.0, kaggle==2.2.4 (see `requirements.txt`)
 - SVD: manual Funk-SVD (SGD + user/item biases + L2 regularization) via numpy/scipy —
   chosen over `surprise` (unmaintained, frequent build failures on Windows/free hosting
-  tiers) and `implicit` (built for implicit-feedback ALS, wrong fit for explicit 1-5
-  star ratings). No extra heavy dependency, full control, more interesting to discuss
-  in an interview.
+  tiers) and `implicit` (built for implicit-feedback ALS). Since Phase 7 the rating
+  scale it targets is `[-1, 1]` (this dataset's ternary preference signal), not 1-5
+  stars -- see Phase 7 notes; the SGD loop itself didn't need to change, only the two
+  `RATING_MIN`/`RATING_MAX` constants in `src/models.py`. No extra heavy dependency,
+  full control, more interesting to discuss in an interview.
 - Streamlit for `app.py`
 - pytest for `tests/`
 
-## Data pipeline status
+## Data pipeline status (Phase 1 -- MovieLens era, superseded by Phase 7, left for history)
 - Phase 1 complete and verified: `python -m src.data_pipeline` downloads (cached
   thereafter), cleans, and splits MovieLens 100K into
   `data/processed/{train,test,movies,users}.csv`.
@@ -24,7 +26,7 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   split; per-user rather than global so every active user has test coverage).
 - Verified: 100,000 ratings, 1,682 movies, 943 users -> 80,367 train / 19,633 test rows.
 
-## Models status (Phase 2)
+## Models status (Phase 2 -- MovieLens era, superseded by Phase 7, left for history)
 - `src/models.py` complete and smoke-tested: `BaseRecommender` ABC (`fit`/`predict`/
   `recommend_for_user`) implemented by `ContentBasedRecommender` (genre one-hot +
   cosine similarity, no TF-IDF since ml-100k has no text/plot field),
@@ -39,7 +41,7 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   movies with zero training ratings; cold-user path verified with a synthetic
   2-rating user.
 
-## Evaluation status (Phase 3)
+## Evaluation status (Phase 3 -- MovieLens era, superseded by Phase 7, left for history)
 - `src/evaluate.py` complete and run: `python -m src.evaluate` fits all 4 models on the
   real train/test split, evaluates RMSE/MAE + Precision/Recall/NDCG@{5,10} on the full
   1682-movie catalog (no negative sampling -- harder but honest), and writes
@@ -221,6 +223,107 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   3.12 pin lives only in Streamlit Cloud's app settings. Fine for this single
   deployment target, but if a second host is ever added it won't inherit the pin.
 
+## Dataset swap: MovieLens -> Indian Regional Movie Dataset (Phase 7)
+- Prompted by the user asking "is it okay if we use only Indian movies?" -- clarified
+  via two rounds of questions (scope: swap the whole dataset vs. cosmetic-only; source:
+  Kaggle mirror vs. the original Google Drive link vs. searching further) before
+  touching code, since this is a full rearchitecture, not a UI tweak.
+- Real research done before committing to a dataset, not assumed: searched for
+  Indian/Bollywood movie datasets with genuine per-user ratings (not just aggregate
+  IMDb scores, which is what most "Bollywood dataset" hits on Kaggle actually are --
+  including one repo, TIMDB, whose "collaborative filtering ratings.csv" turned out to
+  literally be repackaged MovieLens data under a different name). Landed on the
+  **Indian Regional Movie Dataset** (Agarwal et al., arXiv:1801.02203) -- the one real
+  candidate found with individual user ratings: ~10K ratings claimed in the paper, 18
+  Indian regional languages, user demographics (age/occupation/state/languages known).
+  Only two hosting options exist: the original author's personal Google Drive folder
+  from 2018, or a third-party Kaggle mirror (`snathjr/indian-regional-movie`) -- user
+  chose the Kaggle mirror (more durable) and to fully replace MovieLens rather than
+  keep both.
+- Kaggle API credentials obtained from the user directly in chat (username
+  `aswinabd17` + a v3 API key) and written to `~/.kaggle/kaggle.json` -- **outside the
+  repo entirely**, never at risk of being committed. Per policy, Claude does not enter
+  API keys/tokens into web forms even when handed the value directly and explicitly
+  authorized -- this was a local kaggle.json file write (the officially supported
+  Kaggle API credential mechanism), not a form submission, so it was fine to do
+  directly; the same policy meant Claude still did not enter the *TMDb* key into
+  Streamlit Cloud's web secrets form back in Phase 4b, and won't for Kaggle either if a
+  cloud secret is ever needed for it.
+- **Real schema inspected before writing any pipeline code** (downloaded and parsed the
+  actual files rather than trusting the paper's abstract): `ratings.json` is
+  mongoexport-style, one JSON object per line, `{"_id": "<user>", "rated": {"<tt_id>":
+  ["1"|"0"|"-1"], ..., "submit": ["submit"]}}` -- ratings are **ternary, not 1-5
+  stars** (1=liked, 0=disliked, -1=ambiguous/skipped), and `"submit"` is a
+  form-artifact key, not a rating. `movies.csv` uses the movie's real IMDb `tt` id as
+  its key, with genre/language/writer/director/cast stored as JSON-array-strings
+  inside CSV cells. `users.csv` has free-text `_id` handles (not clean numeric ids),
+  `dob` in `DD-MM-YYYY`, `job`/`state`/`gender`. No timestamp anywhere.
+- Real numbers after download+clean (not the paper's claimed ~10K/919/2851 -- this
+  export is larger and messier): 763 raw user records in ratings.json, 20,652 raw
+  rating entries, 2,850 movies in movies.csv, 924 raw rows in users.csv. After cleaning:
+  **908 users, 2,850 movies, 20,529 ratings** (12 junk/placeholder user ids dropped --
+  e.g. `"n"`, `"p"`, a literal `"ABCDEFGHI JKLM"` someone typed into the survey form --
+  and 123 orphan ratings referencing a dropped/missing user or movie dropped too).
+  Random per-user split (80/20-ish, see below): 16,703 train / 3,826 test.
+- **`src/data_pipeline.py` fully rewritten**: `download_indian_movies_dataset` (Kaggle
+  API via the `kaggle` package, local-import so a missing token never crashes module
+  import -- the package's own `__init__.py` already swallows auth errors at import
+  time, but this pipeline calls `.authenticate()` again explicitly to get a real,
+  catchable failure with an actionable `DataDownloadError` message pointing at
+  kaggle.com/settings); `load_movies`/`load_users`/`load_ratings` parse the real schema
+  above (genre one-hot from the JSON-string `genre` field, real `GENRE_COLUMNS` = the
+  21 genres actually found in the data, not a guessed list); `_is_junk_user_id` flags
+  short ids and alphabet-run placeholders generically rather than a hardcoded
+  blocklist; `random_train_test_split` replaces `chronological_train_test_split`
+  (no timestamp field exists in this dataset -- see the function's docstring for the
+  honest tradeoff this gives up vs. what chronological splitting bought on MovieLens).
+- **`src/models.py` updated, not rewritten**: `RATING_MIN`/`RATING_MAX` changed from
+  `(1.0, 5.0)` to `(-1.0, 1.0)` -- the only two constants that needed to change, since
+  every model was already written in terms of them rather than a hardcoded range. Every
+  `user_id: int`/`movie_id: int` type hint (and `Recommendation.movie_id`) became `str`
+  -- mechanical, low-risk, because every model already used `movie_id`/`user_id` as
+  opaque dict keys (`{mid: idx for idx, mid in enumerate(...)}`) rather than assuming a
+  dense integer range for array indexing, confirmed by grep before starting the rename
+  so this wasn't a blind find-replace. `src/evaluate.py`'s
+  `DEFAULT_RELEVANCE_THRESHOLD` changed from `4.0` to `1.0` (relevant = explicitly
+  liked, on this dataset's scale).
+- **Real evaluation re-run, real different result -- reported honestly rather than
+  recycling the MovieLens headline onto new numbers**: SVD wins RMSE/MAE (0.5607 /
+  0.4049) same as before, but this time the **hybrid wins nothing outright** -- the
+  plain popularity baseline actually wins every @5 ranking metric and Precision@10;
+  SVD also wins Recall@10/NDCG@10. Full numbers in `results/metrics.json`. Root cause,
+  not just observed: (1) content signal is weaker here (~24% of movies have no genre
+  tag at all, tagged movies average only 1-2 of 21 genres) so content-based is the
+  worst model on every metric, more decisively than on MovieLens; (2) the rating
+  signal is sparser (20.5K ratings over 2,850 movies, only 1,274 ever rated in
+  training) and more implicit (ternary vs. 1-5 stars carries less information per
+  rating) -- in that regime blending in a comparatively weak content signal mostly
+  adds noise. `alpha=0.6` was not re-tuned for this dataset; a real next step. This is
+  now the README's "why the hybrid doesn't win here" section, written as a genuine
+  finding rather than smoothed over.
+- **Poster lookup upgraded, not just adapted**: since `movie_id` is now a real IMDb
+  `tt` id (unlike MovieLens where posters had to be found by fuzzy title search),
+  added `get_poster_url_by_imdb_id`/`get_poster_urls_by_imdb_id` to `src/posters.py`
+  using TMDb's `/find/{imdb_id}?external_source=imdb_id` endpoint -- strictly more
+  reliable than title search, no normalization heuristics needed. The original
+  title-search path (`get_poster_url`/`get_poster_urls`) is kept for general reuse, not
+  deleted. 8 new tests added alongside the existing poster tests.
+- **Tests fully rewritten for the new schema** (`tests/test_data_pipeline.py`,
+  `tests/test_models.py`) rather than patched -- old fixtures used int ids and 1-5
+  star ratings; new ones use string ids and hand-recomputed ternary-scale expected
+  values (e.g. the content-based cosine-similarity test's expected profile vector and
+  similarity scores were recalculated by hand for the new rating values, not just
+  reused with the type changed). `tests/test_evaluate.py` needed **zero** changes --
+  it only tests the metric math functions in isolation against fabricated numbers, not
+  tied to the real rating scale.
+- `requirements.txt`: added `kaggle==2.2.4` (the version actually installed and
+  verified working).
+- **Not yet done as of writing this note**: `app.py` still describes itself as running
+  on MovieLens and its cold-start sentinel is still the MovieLens-specific `user_id=-1`
+  int; the deployed Streamlit Cloud app has not been rebuilt against the new data. Both
+  are the immediate next step -- see whatever Deployment-status note follows this one
+  for whether that's since been completed.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
@@ -242,14 +345,15 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
 - Any new feature gets a corresponding test in `tests/` before it's considered done
 
 ## Architecture
-- `src/data_pipeline.py` — download/cache MovieLens 100K, clean, split
-- `src/models.py` — `ContentBasedRecommender`, `SVDRecommender`, `HybridRecommender`, cold-start fallback wrapper
+- `src/data_pipeline.py` — download (via Kaggle API) / cache the Indian Regional Movie Dataset, clean, random per-user split
+- `src/models.py` — `ContentBasedRecommender`, `SVDRecommender`, `HybridRecommender`, cold-start fallback wrapper; rating scale is `[-1, 1]` (see Phase 7), ids are strings
 - `src/evaluate.py` — RMSE/MAE plus Precision@K, Recall@K, NDCG@K
-- `src/posters.py` — optional TMDb poster-image lookup by title; no Streamlit dependency
-- `app.py` — Streamlit demo; must run standalone from a fresh clone with no manual setup beyond `pip install`. Also owns the cinema theme's bespoke CSS (`.streamlit/config.toml` sets the base widget theme)
+- `src/posters.py` — optional TMDb poster-image lookup, by IMDb id (preferred, exact) or by title (fallback); no Streamlit dependency
+- `app.py` — Streamlit demo; must run standalone from a fresh clone with no manual setup beyond `pip install` **and a Kaggle API token** (see Phase 7 -- unlike MovieLens, this dataset has no unauthenticated public URL, so this is the one hard prerequisite that can't be made optional). Also owns the cinema theme's bespoke CSS (`.streamlit/config.toml` sets the base widget theme)
 
 ## Do not
-- Don't commit `data/` (raw MovieLens files) — it's gitignored and re-downloaded on first run
+- Don't commit `data/` (raw dataset files) — it's gitignored and re-downloaded on first run
+- Don't commit `~/.kaggle/kaggle.json` or any Kaggle/TMDb credential — Kaggle creds live outside the repo entirely (home directory), TMDb's local key lives in gitignored `.streamlit/secrets.toml`
 - Don't hardcode file paths — use `pathlib`, relative to project root
 - Don't add a dependency without pinning its version in `requirements.txt`
 

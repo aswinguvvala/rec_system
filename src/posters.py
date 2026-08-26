@@ -1,16 +1,19 @@
 """Movie poster lookup via The Movie Database (TMDb) API.
 
-Optional, best-effort enrichment for the Streamlit demo: given a MovieLens
-title like ``"Wings of Desire (1987)"``, look up a poster image URL on
-TMDb. This module never raises out to its caller on a missing API key,
-network failure, or unmatched title -- it always returns ``None`` for that
-title instead, since a broken poster lookup must never take down the
-recommendation demo itself. The app is expected to fall back to a
-placeholder poster whenever a lookup comes back empty.
+Optional, best-effort enrichment for the Streamlit demo: look up a poster
+image URL on TMDb, either by exact IMDb id (:func:`get_poster_url_by_imdb_id`
+-- the Indian Regional Movie Dataset's ``movie_id`` *is* a real IMDb ``tt``
+id, so this is the reliable, no-guessing path) or by fuzzy title search
+(:func:`get_poster_url` -- kept for titles with no known IMDb id). This
+module never raises out to its caller on a missing API key, network
+failure, or unmatched title/id -- it always returns ``None`` instead, since
+a broken poster lookup must never take down the recommendation demo
+itself. The app is expected to fall back to a placeholder poster whenever a
+lookup comes back empty.
 
 This module does no Streamlit-specific caching -- callers (``app.py``)
-wrap :func:`get_poster_urls` in ``st.cache_data`` so repeat lookups for the
-same titles are free across reruns.
+wrap the batch functions in ``st.cache_data`` so repeat lookups are free
+across reruns.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from src.utils import get_logger
 logger = get_logger(__name__)
 
 TMDB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
+TMDB_FIND_URL = "https://api.themoviedb.org/3/find/{imdb_id}"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
 REQUEST_TIMEOUT_SECONDS = 5
 MAX_WORKERS = 8
@@ -119,3 +123,61 @@ def get_poster_urls(titles: Iterable[str], api_key: str | None) -> dict[str, str
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(unique_titles))) as executor:
         posters = list(executor.map(lambda t: get_poster_url(t, api_key), unique_titles))
     return dict(zip(unique_titles, posters))
+
+
+def get_poster_url_by_imdb_id(imdb_id: str, api_key: str | None) -> str | None:
+    """Look up a single movie's poster image URL on TMDb by its exact IMDb id.
+
+    Strictly more reliable than :func:`get_poster_url`'s fuzzy title search
+    when the caller already has a real IMDb ``tt`` id -- no title
+    normalization or year-matching heuristics needed.
+
+    Args:
+        imdb_id: IMDb id, e.g. ``"tt5286444"``.
+        api_key: TMDb v3 API key. If falsy, no request is made.
+
+    Returns:
+        A full poster image URL, or ``None`` if no key was configured, the
+        request failed, or TMDb has no matching movie for this id.
+    """
+    if not api_key:
+        return None
+    try:
+        response = requests.get(
+            TMDB_FIND_URL.format(imdb_id=imdb_id),
+            params={"api_key": api_key, "external_source": "imdb_id"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        results = response.json().get("movie_results", [])
+    except requests.exceptions.RequestException as exc:
+        logger.warning("TMDb find-by-id lookup failed for %r: %s", imdb_id, exc)
+        return None
+    except ValueError as exc:  # malformed JSON body
+        logger.warning("TMDb returned an unparseable response for %r: %s", imdb_id, exc)
+        return None
+
+    poster_path = next((r["poster_path"] for r in results if r.get("poster_path")), None)
+    return f"{TMDB_IMAGE_BASE_URL}{poster_path}" if poster_path else None
+
+
+def get_poster_urls_by_imdb_id(imdb_ids: Iterable[str], api_key: str | None) -> dict[str, str | None]:
+    """Look up poster URLs for many IMDb ids concurrently.
+
+    Args:
+        imdb_ids: IMDb ids, e.g. ``"tt5286444"``. Duplicates are looked up once.
+        api_key: TMDb v3 API key. If falsy, every id maps to ``None``
+            without making any network requests.
+
+    Returns:
+        Mapping from each input id to its poster URL, or ``None`` where no
+        poster could be found. See :func:`get_poster_url_by_imdb_id`.
+    """
+    unique_ids = list(dict.fromkeys(imdb_ids))
+    if not unique_ids:
+        return {}
+    if not api_key:
+        return dict.fromkeys(unique_ids)
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(unique_ids))) as executor:
+        posters = list(executor.map(lambda i: get_poster_url_by_imdb_id(i, api_key), unique_ids))
+    return dict(zip(unique_ids, posters))
