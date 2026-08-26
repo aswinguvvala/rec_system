@@ -277,6 +277,37 @@ def get_tmdb_api_key() -> str | None:
         return None
 
 
+def configure_kaggle_credentials_from_secrets() -> None:
+    """Bridge Kaggle credentials from Streamlit secrets into real environment variables.
+
+    Unlike TMDb (where this app passes the key explicitly to every call), the
+    `kaggle` package authenticates itself, internally, purely via the
+    KAGGLE_USERNAME/KAGGLE_KEY environment variables or a ~/.kaggle/kaggle.json
+    file -- it has no notion of Streamlit secrets. Locally, a kaggle.json file
+    (see README) already satisfies this with no code involved. On Streamlit
+    Community Cloud, secrets.toml values are *not* automatically exposed as
+    real process environment variables -- confirmed the hard way: the deployed
+    app's Kaggle download failed with the kaggle package's own "Authentication
+    required" message even with KAGGLE_USERNAME/KAGGLE_KEY set as Cloud
+    secrets, because nothing had ever copied them into os.environ where the
+    kaggle package actually looks. This bridges them explicitly, once, before
+    the pipeline runs. A no-op wherever the env vars are already set (e.g.
+    locally) or no matching secrets exist.
+    """
+    for key in ("KAGGLE_USERNAME", "KAGGLE_KEY"):
+        if os.environ.get(key):
+            continue
+        try:
+            value = st.secrets.get(key)
+        except Exception:  # noqa: BLE001 - same reasoning as get_tmdb_api_key: st.secrets'
+            # behavior with no secrets.toml varies across Streamlit versions/hosts, and a
+            # missing secret here must never be fatal -- download_indian_movies_dataset
+            # already raises its own actionable DataDownloadError if credentials are absent.
+            value = None
+        if value:
+            os.environ[key] = value
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_posters(movie_ids: tuple[str, ...], api_key: str | None) -> dict[str, str | None]:
     # movie_id is the movie's real IMDb tt id in this dataset, so an exact
@@ -338,6 +369,7 @@ def render_recommendations(
 
 st.markdown(CINEMA_CSS, unsafe_allow_html=True)
 
+configure_kaggle_credentials_from_secrets()
 try:
     data = load_data()
 except DataPipelineError as exc:

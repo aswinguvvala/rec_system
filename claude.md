@@ -372,6 +372,34 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   with a genuinely fresh raw-data cache (moved `data/raw/indian_movies` and
   `data/processed` aside first) that this doesn't slow down or break the real,
   successful download path: ~4.8s end-to-end, unchanged from before the fix.
+- **Third issue, and the actual root cause of the "hang"**: after the timeout fix
+  deployed (via another Reboot -- a plain push still wasn't enough, see above), the
+  app stopped hanging and instead surfaced a real error from the `kaggle` package
+  itself: `Authentication required to call the Kaggle API` -- it wanted either a
+  `~/.kaggle/kaggle.json` file or the newer `KAGGLE_API_TOKEN`/`~/.kaggle/access_token`
+  OAuth flow, and did **not** pick up the `KAGGLE_USERNAME`/`KAGGLE_KEY` Streamlit
+  Cloud secrets at all. Root cause: **Streamlit secrets.toml values are not
+  automatically exposed as real OS environment variables** -- an assumption this
+  session made without verifying it, unlike the TMDb key, which was always passed
+  explicitly through the code rather than assumed to appear in `os.environ`. Locally
+  this never surfaced because a real `~/.kaggle/kaggle.json` file already satisfied
+  the kaggle package's own auth resolution, independent of anything Streamlit does.
+  Fixed with `configure_kaggle_credentials_from_secrets()` in `app.py`: explicitly
+  copies `st.secrets["KAGGLE_USERNAME"]`/`["KAGGLE_KEY"]` into `os.environ` (only
+  when not already set, so it's a no-op locally) before `load_data()` ever runs --
+  the same bridge-explicitly-rather-than-assume pattern `get_tmdb_api_key()` already
+  used, just applied to a dependency (the `kaggle` package) that reads the environment
+  itself instead of taking a key as an argument. Verified locally by faithfully
+  reproducing the Cloud scenario end-to-end: moved the real `~/.kaggle/kaggle.json`
+  aside, added `KAGGLE_USERNAME`/`KAGGLE_KEY` to local `.streamlit/secrets.toml`
+  (mirroring the Cloud secrets), cleared all cached data, and confirmed via the
+  browser tool that the app downloads, trains, and renders real posters/titles using
+  *only* the secrets-bridge path -- no kaggle.json involved at all.
+  **General lesson**: don't assume a platform's "secrets" mechanism transparently
+  becomes environment variables for every library that reads `os.environ` directly --
+  verify it, or bridge it explicitly, especially for any dependency (unlike this
+  project's own `requests`-based TMDb calls) that authenticates itself internally
+  rather than taking credentials as an explicit function argument.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
