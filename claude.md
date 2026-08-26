@@ -318,11 +318,35 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   tied to the real rating scale.
 - `requirements.txt`: added `kaggle==2.2.4` (the version actually installed and
   verified working).
-- **Not yet done as of writing this note**: `app.py` still describes itself as running
-  on MovieLens and its cold-start sentinel is still the MovieLens-specific `user_id=-1`
-  int; the deployed Streamlit Cloud app has not been rebuilt against the new data. Both
-  are the immediate next step -- see whatever Deployment-status note follows this one
-  for whether that's since been completed.
+- `app.py` updated to match: dataset-name copy, cold-start sentinel changed from the
+  MovieLens-specific int `-1` to a string (`"__simulated_new_user__"`, since real user
+  ids are now free-text handles), and poster lookup switched to
+  `get_poster_urls_by_imdb_id` (keyed by `movie_id`, which *is* the IMDb id now,
+  instead of by constructed title strings). Verified locally end-to-end with the
+  browser tool: real Bollywood titles and posters render correctly (3 Idiots, Munna
+  Bhai M.B.B.S., Lage Raho Munna Bhai, ...), the 4-column compare view, and the
+  cold-start simulated-user path all work with zero exceptions.
+- **Real bug hit on the actual redeploy, not caught locally**: after pushing and
+  redeploying, the live app crashed with `Failed to train models: "['Biography',
+  'Family', 'History', 'Music', 'News', 'Sport'] not in index"`. Root cause: `data/`
+  is gitignored, so a code-only redeploy doesn't wipe it, and Streamlit Cloud reuses
+  the same container across deploys -- the *previous* MovieLens-era
+  `data/processed/movies.csv` (19 genre columns) was still sitting on disk and
+  satisfied `run_pipeline`'s old cache check ("do the files exist"), so it got loaded
+  as-is instead of being rebuilt from the new Kaggle source, and every model choked on
+  the six genre columns that only exist in the new dataset's taxonomy. This couldn't
+  have been caught locally since the local machine never had a MovieLens-era cache
+  sitting next to the new code. Fixed with `_processed_cache_is_usable` in
+  `src/data_pipeline.py`: before trusting a cache hit, `run_pipeline` now also checks
+  the cached `movies.csv` header actually contains every column in `GENRE_COLUMNS`,
+  and rebuilds from scratch (with a logged warning) if not. Covered by a real
+  integration test (`TestRunPipelineCacheInvalidation`) that reproduces the exact
+  failure: a stale processed cache missing most genre columns sitting next to a valid
+  raw dataset, asserting the pipeline rebuilds rather than trusting the stale files.
+  General lesson worth remembering: an on-disk cache keyed only on "do the expected
+  files exist" is unsafe across any change to what those files are expected to
+  contain, not just across dataset swaps -- worth a second look if this pipeline's
+  processed-CSV schema changes again for any reason.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows

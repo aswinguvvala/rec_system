@@ -376,6 +376,37 @@ def random_train_test_split(
     return train_df, test_df
 
 
+def _processed_cache_is_usable(movies_path: Path) -> bool:
+    """Check that a cached ``movies.csv`` actually matches this pipeline's schema.
+
+    Guards against a real failure mode: ``data/processed/`` is gitignored, so
+    it isn't wiped by a code-only redeploy -- a persistent host (e.g. a
+    Streamlit Cloud container reused across deploys) can retain processed
+    CSVs from a *previous, different* dataset. That bit this project for
+    real when it moved off MovieLens: the leftover MovieLens ``movies.csv``
+    (19 genre columns) satisfied the old "do the files exist" check, so it
+    got loaded as-is, and every model choked with ``KeyError`` on the six
+    genre columns (``Biography``, ``Family``, ``History``, ``Music``,
+    ``News``, ``Sport``) that only exist in this dataset's taxonomy. Only
+    the header needs reading, not the full file, so this check is cheap
+    enough to run on every cache hit.
+
+    Args:
+        movies_path: Path to the cached ``movies.csv``.
+
+    Returns:
+        ``True`` if the file exists and its header contains every column in
+        :data:`GENRE_COLUMNS`.
+    """
+    if not movies_path.exists():
+        return False
+    try:
+        header_columns = set(pd.read_csv(movies_path, nrows=0).columns)
+    except (pd.errors.ParserError, pd.errors.EmptyDataError):
+        return False
+    return set(GENRE_COLUMNS).issubset(header_columns)
+
+
 def run_pipeline(
     raw_dir: Path = RAW_DATA_DIR,
     processed_dir: Path = PROCESSED_DATA_DIR,
@@ -383,9 +414,11 @@ def run_pipeline(
 ) -> dict[str, pd.DataFrame]:
     """Run the full pipeline: download, load, clean, split, and persist.
 
-    Idempotent: if the processed CSVs already exist and ``force`` is
-    ``False``, they are loaded from disk instead of being recomputed. This
-    is what lets ``app.py`` call this on every Streamlit launch cheaply.
+    Idempotent: if the processed CSVs already exist *and match this
+    pipeline's current schema* (see :func:`_processed_cache_is_usable`) and
+    ``force`` is ``False``, they are loaded from disk instead of being
+    recomputed. This is what lets ``app.py`` call this on every Streamlit
+    launch cheaply.
 
     Args:
         raw_dir: Directory for the raw/cached dataset download.
@@ -404,11 +437,17 @@ def run_pipeline(
     paths = {name: processed_dir / f"{name}.csv" for name in ("train", "test", "movies", "users")}
 
     if not force and all(p.exists() for p in paths.values()):
-        logger.info("Loading cached processed data from %s", processed_dir)
-        return {
-            name: pd.read_csv(p, dtype={"user_id": str, "movie_id": str})
-            for name, p in paths.items()
-        }
+        if _processed_cache_is_usable(paths["movies"]):
+            logger.info("Loading cached processed data from %s", processed_dir)
+            return {
+                name: pd.read_csv(p, dtype={"user_id": str, "movie_id": str})
+                for name, p in paths.items()
+            }
+        logger.warning(
+            "Cached data at %s doesn't match this pipeline's current schema (likely left over "
+            "from a previous dataset) -- ignoring it and rebuilding from scratch.",
+            processed_dir,
+        )
 
     raw_dir_path = download_indian_movies_dataset(raw_dir)
     ratings = load_ratings(raw_dir_path)

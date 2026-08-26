@@ -11,12 +11,14 @@ from src.data_pipeline import (
     DataDownloadError,
     DataFormatError,
     _is_junk_user_id,
+    _processed_cache_is_usable,
     download_indian_movies_dataset,
     load_movies,
     load_ratings,
     load_users,
     merge_data,
     random_train_test_split,
+    run_pipeline,
 )
 
 
@@ -257,3 +259,78 @@ class TestDownloadIndianMoviesDataset:
 
         with pytest.raises(DataDownloadError):
             download_indian_movies_dataset(tmp_path)
+
+
+class TestProcessedCacheIsUsable:
+    def test_missing_file_is_not_usable(self, tmp_path):
+        assert _processed_cache_is_usable(tmp_path / "movies.csv") is False
+
+    def test_file_with_every_genre_column_is_usable(self, tmp_path):
+        movies_path = tmp_path / "movies.csv"
+        pd.DataFrame(columns=["movie_id", "title"] + GENRE_COLUMNS).to_csv(movies_path, index=False)
+
+        assert _processed_cache_is_usable(movies_path) is True
+
+    def test_file_missing_genre_columns_is_not_usable(self, tmp_path):
+        # Reproduces the real bug this check was added for: a cached movies.csv left over
+        # from a previous, different dataset (e.g. MovieLens's 19-genre taxonomy) satisfies
+        # "the file exists" but is missing several of this dataset's real genre columns.
+        movies_path = tmp_path / "movies.csv"
+        stale_columns = ["movie_id", "title", "Action", "Comedy", "Drama"]  # missing most of GENRE_COLUMNS
+        pd.DataFrame(columns=stale_columns).to_csv(movies_path, index=False)
+
+        assert _processed_cache_is_usable(movies_path) is False
+
+
+class TestRunPipelineCacheInvalidation:
+    def test_stale_processed_cache_is_rebuilt_not_trusted(self, tmp_path, monkeypatch):
+        raw_dir = tmp_path / "raw"
+        processed_dir = tmp_path / "processed"
+        extracted = raw_dir / "indian_movies"
+        extracted.mkdir(parents=True)
+
+        _write_movies_csv(
+            extracted,
+            [
+                {
+                    "movie_id": "tt001",
+                    "description": "",
+                    "language": "[]",
+                    "released": "2020-01-01T00:00:00.000Z",
+                    "rating": "8.0",
+                    "writer": "[]",
+                    "director": "[]",
+                    "cast": "[]",
+                    "genre": json.dumps(["Drama"]),
+                    "name": "A Real Movie",
+                }
+            ],
+        )
+        _write_users_csv(
+            extracted,
+            [{"_id": "realuser1", "languages": "[]", "job": "Student", "state": "Delhi", "dob": "16-06-2000", "gender": "Male"}],
+        )
+        (extracted / "ratings.json").write_text(
+            json.dumps({"_id": "realuser1", "rated": {"tt001": ["1"]}}) + "\n", encoding="utf-8"
+        )
+
+        # Simulate a processed/ dir left over from a previous, different dataset: present,
+        # so the naive "do the files exist" check alone would trust it, but missing almost
+        # every real genre column.
+        processed_dir.mkdir(parents=True)
+        pd.DataFrame(columns=["user_id", "movie_id", "rating"]).to_csv(processed_dir / "train.csv", index=False)
+        pd.DataFrame(columns=["user_id", "movie_id", "rating"]).to_csv(processed_dir / "test.csv", index=False)
+        pd.DataFrame(columns=["movie_id", "title", "Action", "Comedy", "Drama"]).to_csv(processed_dir / "movies.csv", index=False)
+        pd.DataFrame(columns=["user_id", "age"]).to_csv(processed_dir / "users.csv", index=False)
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("run_pipeline hit Kaggle even though a valid raw-data cache exists")
+
+        monkeypatch.setattr("kaggle.api.authenticate", _fail_if_called)
+
+        result = run_pipeline(raw_dir=raw_dir, processed_dir=processed_dir)
+
+        # Rebuilt from the real raw data, not the stale processed cache -- proven by the
+        # rebuilt movies frame actually having the full real genre taxonomy.
+        assert set(GENRE_COLUMNS).issubset(result["movies"].columns)
+        assert list(result["movies"]["movie_id"]) == ["tt001"]
