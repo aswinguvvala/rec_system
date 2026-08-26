@@ -157,6 +157,13 @@ architecture at all. `PopularityRecommender.recommend_for_genre_profile` already
 blended popularity with genre affinity for the training-data cold-start path; this
 just feeds it live picks instead.
 
+Genre affinity alone turned out not to be enough: picking three Telugu movies
+originally returned an all-Hindi list, because this dataset's genres carry no
+language information and Hindi blockbusters simply have far more ratings than most
+regional titles. `movie_ids_matching_languages` narrows the ranked candidate pool to
+movies sharing a language with the picks *before* popularity and genre affinity are
+even applied — a second, orthogonal signal rather than a bigger genre weight.
+
 ### Why the hybrid doesn't win here (and why that's still a real result)
 
 On MovieLens, blending content-based similarity into SVD improved ranking quality even

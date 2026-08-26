@@ -23,6 +23,7 @@ from src.models import (
     PopularityRecommender,
     SVDRecommender,
     genre_profile_from_movie_ids,
+    movie_ids_matching_languages,
 )
 
 GENRES = ["Action", "Comedy", "Drama"]
@@ -31,6 +32,7 @@ GENRES = ["Action", "Comedy", "Drama"]
 @pytest.fixture
 def movies_df() -> pd.DataFrame:
     # 1: Action, 2: Action+Comedy, 3: Comedy, 4: Drama, 5: Action+Drama
+    # languages: 1=Telugu, 2=Telugu+Hindi, 3=Hindi, 4=Tamil, 5=Hindi
     return pd.DataFrame(
         {
             "movie_id": ["1", "2", "3", "4", "5"],
@@ -38,6 +40,7 @@ def movies_df() -> pd.DataFrame:
             "Action": [1, 1, 0, 0, 1],
             "Comedy": [0, 1, 1, 0, 0],
             "Drama": [0, 0, 0, 1, 1],
+            "languages": ["Telugu", "Telugu, Hindi", "Hindi", "Tamil", "Hindi"],
         }
     )
 
@@ -342,3 +345,60 @@ class TestGenreProfileFromMovieIds:
 
         assert recs[0].movie_id in {"4", "5"}  # both have Drama=1
         assert recs[0].source == "cold_start"
+
+
+class TestMovieIdsMatchingLanguages:
+    def test_single_pick_matches_movies_sharing_that_language(self, movies_df):
+        # 1: Telugu -> shares "Telugu" with 2 (Telugu, Hindi); 3/4/5 don't have Telugu.
+        matches = movie_ids_matching_languages(["1"], movies_df)
+        assert matches == {"1", "2"}
+
+    def test_multi_language_pick_matches_on_any_shared_language(self, movies_df):
+        # 3: Hindi -> shares "Hindi" with 2 (Telugu, Hindi) and 5 (Hindi).
+        matches = movie_ids_matching_languages(["3"], movies_df)
+        assert matches == {"2", "3", "5"}
+
+    def test_empty_picks_returns_none(self, movies_df):
+        assert movie_ids_matching_languages([], movies_df) is None
+
+    def test_unknown_movie_ids_only_returns_none(self, movies_df):
+        assert movie_ids_matching_languages(["does-not-exist"], movies_df) is None
+
+    def test_movie_with_no_language_info_is_never_a_match(self, movies_df):
+        movies_df = movies_df.copy()
+        movies_df.loc[movies_df["movie_id"] == "4", "languages"] = ""  # simulate missing language data
+        # Picking movie 4 itself (now language-less) contributes nothing to "wanted".
+        assert movie_ids_matching_languages(["4"], movies_df) is None
+        # And movie 4 never matches anyone else's language, even when it should logically
+        # never appear in a language-restricted candidate set once it has no language at all.
+        matches = movie_ids_matching_languages(["3"], movies_df)  # Hindi
+        assert "4" not in matches
+
+
+class TestRecommendForGenreProfileCandidateRestriction:
+    def test_candidate_movie_ids_restricts_the_ranked_pool(self, movies_df, train_df):
+        model = PopularityRecommender()
+        model.fit(train_df, movies_df)
+
+        # Without restriction, movie 1 (highest popularity among Action movies in this
+        # fixture) is a plausible top pick for a pure-Action profile.
+        action_profile = np.array([1.0, 0.0, 0.0])
+        unrestricted = model.recommend_for_genre_profile(genre_weights=action_profile, n=5, exclude_seen=False)
+        assert any(r.movie_id == "1" for r in unrestricted)
+
+        # Restricting to Hindi-only candidates (2, 3, 5) must exclude movie 1 (Telugu)
+        # entirely, even though it would otherwise be a strong Action match.
+        hindi_candidates = movie_ids_matching_languages(["3"], movies_df)  # {"2", "3", "5"}
+        restricted = model.recommend_for_genre_profile(
+            genre_weights=action_profile, n=5, exclude_seen=False, candidate_movie_ids=hindi_candidates
+        )
+        assert restricted
+        assert all(r.movie_id in hindi_candidates for r in restricted)
+        assert not any(r.movie_id == "1" for r in restricted)
+
+    def test_empty_candidate_set_returns_no_recommendations(self, movies_df, train_df):
+        model = PopularityRecommender()
+        model.fit(train_df, movies_df)
+
+        recs = model.recommend_for_genre_profile(genre_weights=None, n=5, candidate_movie_ids=set())
+        assert recs == []

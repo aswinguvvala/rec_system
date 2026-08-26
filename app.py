@@ -36,6 +36,7 @@ from src.models import (
     Recommendation,
     SVDRecommender,
     genre_profile_from_movie_ids,
+    movie_ids_matching_languages,
 )
 from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
@@ -383,9 +384,19 @@ def recommend_for_new_user(
     ``PopularityRecommender.recommend_for_genre_profile`` the wrapper uses
     internally. With no picks yet, this is identical to pure trending popularity.
 
+    Genre affinity alone is language-blind (see
+    :func:`movie_ids_matching_languages`), so picks are also used to narrow the
+    ranked pool to movies sharing at least one language with them -- otherwise a
+    handful of blockbuster hits in the catalog's dominant language can dominate
+    every profile regardless of what the user actually picked, since a broad
+    genre match plus much higher raw popularity outranks a smaller-language film
+    that's a better match. Falls back to the unrestricted catalog if the picks
+    have no parsed language info at all.
+
     Args:
         popularity_model: A fitted ``PopularityRecommender``.
-        movies_df: Movie metadata, used to build the genre profile from picks.
+        movies_df: Movie metadata, used to build the genre/language profile
+            from picks.
         picked_movie_ids: IDs of movies the user picked as "movies I like".
         n: Number of recommendations to return.
 
@@ -394,11 +405,15 @@ def recommend_for_new_user(
         user's own picks.
     """
     genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
+    language_candidates = movie_ids_matching_languages(picked_movie_ids, movies_df)
     # Fetch slack beyond n: a movie the user just picked as "liked" is exactly the
     # kind of item this ranking tends to surface, so it's likely to appear in the
     # raw results and needs to be filtered back out below.
     raw_recs = popularity_model.recommend_for_genre_profile(
-        genre_weights=genre_profile, n=n + len(picked_movie_ids), exclude_seen=False
+        genre_weights=genre_profile,
+        n=n + len(picked_movie_ids),
+        exclude_seen=False,
+        candidate_movie_ids=language_candidates,
     )
     picked = set(picked_movie_ids)
     return [r for r in raw_recs if r.movie_id not in picked][:n]
@@ -462,7 +477,7 @@ with st.sidebar:
             help="No rating history needed -- recommendations below update live from these picks.",
         )
         if picked_movie_ids:
-            st.caption(f"Personalizing from {len(picked_movie_ids)} pick(s).")
+            st.caption(f"Personalizing from {len(picked_movie_ids)} pick(s) -- matched by genre and language.")
         else:
             st.caption("No picks yet -- showing overall trending movies until you pick a few.")
     else:

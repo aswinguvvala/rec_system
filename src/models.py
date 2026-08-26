@@ -398,6 +398,7 @@ class PopularityRecommender(BaseRecommender):
         user_id: str | None = None,
         n: int = 10,
         exclude_seen: bool = True,
+        candidate_movie_ids: set[str] | None = None,
     ) -> list[Recommendation]:
         """Rank movies by popularity, optionally blended with genre affinity.
 
@@ -410,6 +411,16 @@ class PopularityRecommender(BaseRecommender):
                 user has already rated.
             n: Number of recommendations to return.
             exclude_seen: Whether to exclude the user's seen movies.
+            candidate_movie_ids: If given, restricts ranking to just these
+                movie ids before scoring -- e.g. narrowing to movies sharing
+                a language with a cold-start user's live picks (see
+                :func:`movie_ids_matching_languages` and the Streamlit app's
+                onboarding flow). Genre affinity alone doesn't carry language
+                information (this dataset's 21 genres are language-agnostic),
+                so a broad genre match can otherwise let a popular film in a
+                different language outrank a less-popular one that actually
+                matches what the user picked. ``None`` ranks the full
+                catalog, unchanged from before this parameter existed.
 
         Returns:
             Up to ``n`` :class:`Recommendation` objects with
@@ -417,14 +428,25 @@ class PopularityRecommender(BaseRecommender):
         """
         if self._movie_stats is None or self._genre_matrix is None:
             return []
-        wr = self._movie_stats["weighted_rating"].to_numpy(dtype=float)
+
+        if candidate_movie_ids is not None:
+            mask = self._movie_stats["movie_id"].isin(candidate_movie_ids).to_numpy()
+            movie_stats = self._movie_stats[mask]
+            genre_matrix = self._genre_matrix[mask]
+        else:
+            movie_stats = self._movie_stats
+            genre_matrix = self._genre_matrix
+        if movie_stats.empty:
+            return []
+
+        wr = movie_stats["weighted_rating"].to_numpy(dtype=float)
         wr_range = wr.max() - wr.min()
         wr_norm = (wr - wr.min()) / wr_range if wr_range > 1e-12 else np.zeros_like(wr)
 
         if genre_weights is not None and np.linalg.norm(genre_weights) > 0:
-            genre_norms = np.linalg.norm(self._genre_matrix, axis=1)
+            genre_norms = np.linalg.norm(genre_matrix, axis=1)
             weight_norm = np.linalg.norm(genre_weights)
-            affinity = (self._genre_matrix @ genre_weights) / (genre_norms * weight_norm + 1e-12)
+            affinity = (genre_matrix @ genre_weights) / (genre_norms * weight_norm + 1e-12)
             affinity_range = affinity.max() - affinity.min()
             affinity_norm = (
                 (affinity - affinity.min()) / affinity_range if affinity_range > 1e-12 else np.zeros_like(affinity)
@@ -434,7 +456,7 @@ class PopularityRecommender(BaseRecommender):
             scores = wr_norm
 
         seen = self._seen.get(user_id, set()) if (exclude_seen and user_id is not None) else set()
-        movie_ids = self._movie_stats["movie_id"].to_numpy()
+        movie_ids = movie_stats["movie_id"].to_numpy()
         ranked_idx = np.argsort(-scores)
         results: list[Recommendation] = []
         for idx in ranked_idx:
@@ -478,6 +500,51 @@ def genre_profile_from_movie_ids(
     if matches.empty:
         return None
     return matches.to_numpy(dtype=float).sum(axis=0)
+
+
+def movie_ids_matching_languages(movie_ids: list[str], movies_df: pd.DataFrame) -> set[str] | None:
+    """Find every catalog movie sharing at least one language with the given movies.
+
+    Exists because genre affinity alone is language-blind: this dataset's 21
+    genres (Action, Comedy, Drama, ...) say nothing about which of its 18
+    Indian regional languages a film is in, so a broad genre match (e.g.
+    "Comedy") can happily surface a popular film in a completely different
+    language than what the user actually picked -- popularity does the rest,
+    since a handful of blockbuster hits in the catalog's dominant language
+    outrank almost everything else on raw rating counts alone. Meant to be
+    used as :meth:`PopularityRecommender.recommend_for_genre_profile`'s
+    ``candidate_movie_ids``, narrowing the ranked pool to same-language films
+    before popularity and genre affinity ever come into it.
+
+    Args:
+        movie_ids: IDs of movies to read the "wanted" language(s) from --
+            typically a cold-start user's live picks.
+        movies_df: Movie metadata with a comma-joined ``languages`` column
+            (see ``src/data_pipeline.py``'s ``load_movies``).
+
+    Returns:
+        Set of matching movie ids (this always includes the input
+        ``movie_ids`` themselves, since a film trivially shares a language
+        with itself), or ``None`` if none of ``movie_ids`` had any parsed
+        language info at all -- callers should treat ``None`` as "can't
+        narrow by language" and fall back to the unrestricted catalog rather
+        than recommending nothing.
+    """
+
+    def _split(cell: object) -> set[str]:
+        if not isinstance(cell, str) or not cell:
+            return set()
+        return {lang.strip() for lang in cell.split(",") if lang.strip()}
+
+    picked = movies_df.loc[movies_df["movie_id"].isin(set(movie_ids)), "languages"]
+    wanted_languages: set[str] = set()
+    for cell in picked:
+        wanted_languages |= _split(cell)
+    if not wanted_languages:
+        return None
+
+    matches_mask = movies_df["languages"].apply(lambda cell: bool(_split(cell) & wanted_languages))
+    return set(movies_df.loc[matches_mask, "movie_id"])
 
 
 class HybridRecommender(BaseRecommender):

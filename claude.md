@@ -441,6 +441,37 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   column shows the identical personalized ranking. No code changes were needed in
   `src/models.py` beyond the one new pure function -- the recommender architecture
   already supported this, it just needed a real UI path to it.
+- **Real bug found by the user immediately after shipping this**: picking three
+  Telugu movies ("1 - Nenokkadine", "#Pellichoopulu", "Nuvvu Naaku Nachchav")
+  returned an all-Hindi recommendation list (Bawarchi, DDLJ, OMG: Oh My God!, 3
+  Idiots, PK, ...). Diagnosed with real data before touching any code: the genre
+  profile from the 3 picks *was* being applied correctly (verified by comparing
+  against pure-popularity output side by side -- different ranking, not a silent
+  fallback) -- the actual gap is that genre affinity carries **no language
+  information at all**. This dataset's 21 genres are language-agnostic, and
+  broad genres like Comedy/Drama are shared by huge Hindi blockbusters with far
+  more ratings than any Telugu title, so they won even with a real, correctly-applied
+  genre match. 338 Telugu-tagged movies exist in the catalog -- the ranking just
+  never got a chance to consider language at all.
+  Fixed with a second, orthogonal signal, not a bigger genre-affinity weight: new
+  `movie_ids_matching_languages()` in `src/models.py` finds every movie sharing at
+  least one of the picks' languages (parses the comma-joined `languages` column;
+  returns `None` -- "can't narrow, don't filter" -- if the picks have no parsed
+  language info, rather than silently returning nothing). `PopularityRecommender
+  .recommend_for_genre_profile` gained an optional `candidate_movie_ids` parameter
+  that restricts the ranked pool *before* scoring (default `None` -- fully
+  backward compatible; every other call site, including `ColdStartRecommender`'s
+  training-data path, is unaffected). `recommend_for_new_user` in `app.py` now
+  passes the picks' language-matched candidates through. 7 new tests, including
+  one proving a movie that would otherwise win on genre affinity gets excluded
+  once it's outside the language-restricted candidate set. Re-verified against
+  the user's *exact* three picks with the real fitted model (not the toy test
+  fixture): the top 10 went from all-Hindi to Telugu/Tamil-Telugu titles (English
+  Vinglish, Minnale, Subhodayam, Bommarillu, Dil Se.., Engeyum Eppodhum,
+  Shankarabharanam, Sagara Sangamam, Swathi Kiranam, Missamma), and confirmed
+  live in the browser with real picks that the fix renders correctly.
+  Sidebar caption updated to say picks are "matched by genre and language" so
+  this isn't a silent behavior change.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
