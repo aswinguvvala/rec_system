@@ -410,6 +410,38 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   project's own `requests`-based TMDb calls) that authenticates itself internally
   rather than taking credentials as an explicit function argument.
 
+## Live cold-start onboarding (Phase 8)
+- User feedback: the existing "simulate a brand-new user" toggle only proved the
+  cold-start *fallback* triggers (empty raw models -> pure trending popularity) --
+  it didn't let a real new user actually get personalized recommendations without
+  any rating history, which is the more realistic cold-start UX (e.g. Netflix's
+  "pick a few titles to get started" onboarding).
+- No changes needed to the fallback/training architecture -- `PopularityRecommender
+  .recommend_for_genre_profile` already existed and already does exactly this (blend
+  popularity with a genre-affinity vector); it was just never wired up to anything
+  but `ColdStartRecommender`'s *training-data*-derived profile
+  (`_genre_profile_for_user`). Added `genre_profile_from_movie_ids` in
+  `src/models.py` as the live-picks equivalent -- same shape, but each pick
+  contributes an equal, unweighted share (there's no rating attached to a live
+  pick, unlike training data). 6 new tests, including one exercising the full
+  pick -> profile -> `recommend_for_genre_profile` path end-to-end.
+- New sidebar UI (`app.py`): when "Simulate a brand-new user" is checked, an
+  `st.multiselect` lets the user pick real movies from the catalog ("Movies you
+  like"); `recommend_for_new_user` turns picks into a genre profile and re-ranks
+  live via the popularity model, filtering the user's own picks back out of the
+  results (fetches `n + len(picks)` candidates first since a picked-as-liked movie
+  is exactly the kind of item this ranking surfaces). With zero picks, behavior is
+  unchanged from before (pure trending popularity) -- this is additive, not a
+  replacement of the existing fallback path. Wired into both the single-view and
+  the side-by-side compare view's Popularity Baseline column.
+- Verified live locally with the browser tool: typed "Sholay" into the picker,
+  selected it, and watched the recommendation set completely re-rank in real time
+  (to titles like Mr. India, Zindagi Na Milegi Dobara, Queen) with none of them
+  being the picked movie itself; confirmed the compare view's Popularity Baseline
+  column shows the identical personalized ranking. No code changes were needed in
+  `src/models.py` beyond the one new pure function -- the recommender architecture
+  already supported this, it just needed a real UI path to it.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

@@ -22,6 +22,7 @@ from src.models import (
     HybridRecommender,
     PopularityRecommender,
     SVDRecommender,
+    genre_profile_from_movie_ids,
 )
 
 GENRES = ["Action", "Comedy", "Drama"]
@@ -300,3 +301,44 @@ class TestColdStartRecommender:
         assert wrapper.predict("2", "unknown_movie") == pytest.approx(
             standalone_popularity.predict("2", "unknown_movie")
         )
+
+
+class TestGenreProfileFromMovieIds:
+    """Covers the live cold-start onboarding path: a brand-new user with no rating
+    history picks a few movies they like in the UI, and this turns those picks into
+    the same kind of genre-preference vector PopularityRecommender.recommend_for_genre_profile
+    expects -- see the Streamlit app's "pick a few movies you like" flow.
+    """
+
+    def test_single_pick_returns_that_movies_genre_vector(self, movies_df):
+        profile = genre_profile_from_movie_ids(["1"], movies_df, genre_columns=GENRES)  # 1: Action only
+        assert list(profile) == [1.0, 0.0, 0.0]
+
+    def test_multiple_picks_sum_genre_vectors(self, movies_df):
+        # 1: Action [1,0,0], 4: Drama [0,0,1] -> summed [1,0,1]
+        profile = genre_profile_from_movie_ids(["1", "4"], movies_df, genre_columns=GENRES)
+        assert list(profile) == [1.0, 0.0, 1.0]
+
+    def test_empty_picks_returns_none(self, movies_df):
+        assert genre_profile_from_movie_ids([], movies_df, genre_columns=GENRES) is None
+
+    def test_unknown_movie_ids_only_returns_none(self, movies_df):
+        assert genre_profile_from_movie_ids(["does-not-exist"], movies_df, genre_columns=GENRES) is None
+
+    def test_unknown_ids_mixed_with_known_ones_are_ignored(self, movies_df):
+        profile = genre_profile_from_movie_ids(
+            ["1", "does-not-exist"], movies_df, genre_columns=GENRES
+        )
+        assert list(profile) == [1.0, 0.0, 0.0]
+
+    def test_feeds_recommend_for_genre_profile_end_to_end(self, movies_df, train_df):
+        # Picking a pure-Drama movie should bias recommendations toward Drama,
+        # exactly like the hand-verified genre_weights test above.
+        model = PopularityRecommender()
+        model.fit(train_df, movies_df)
+
+        profile = genre_profile_from_movie_ids(["4"], movies_df, genre_columns=GENRES)  # 4: Drama Only
+        recs = model.recommend_for_genre_profile(genre_weights=profile, n=1, exclude_seen=False)
+
+        assert recs[0].movie_id in {"4", "5"}  # both have Drama=1
+        assert recs[0].source == "cold_start"

@@ -35,6 +35,7 @@ from src.models import (
     PopularityRecommender,
     Recommendation,
     SVDRecommender,
+    genre_profile_from_movie_ids,
 )
 from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
@@ -367,6 +368,42 @@ def render_recommendations(
     container.markdown(f'<div class="{wrapper_class}">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+def recommend_for_new_user(
+    popularity_model: PopularityRecommender,
+    movies_df: pd.DataFrame,
+    picked_movie_ids: list[str],
+    n: int,
+) -> list[Recommendation]:
+    """Recommend movies for a brand-new user based on movies they just said they like.
+
+    This is the live counterpart to ``ColdStartRecommender``'s training-data-driven
+    fallback: instead of a real rating history, it turns the user's on-the-spot
+    picks into a genre-preference vector (:func:`genre_profile_from_movie_ids`) and
+    blends that with overall popularity via the same
+    ``PopularityRecommender.recommend_for_genre_profile`` the wrapper uses
+    internally. With no picks yet, this is identical to pure trending popularity.
+
+    Args:
+        popularity_model: A fitted ``PopularityRecommender``.
+        movies_df: Movie metadata, used to build the genre profile from picks.
+        picked_movie_ids: IDs of movies the user picked as "movies I like".
+        n: Number of recommendations to return.
+
+    Returns:
+        Up to ``n`` :class:`Recommendation` objects, none of them one of the
+        user's own picks.
+    """
+    genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
+    # Fetch slack beyond n: a movie the user just picked as "liked" is exactly the
+    # kind of item this ranking tends to surface, so it's likely to appear in the
+    # raw results and needs to be filtered back out below.
+    raw_recs = popularity_model.recommend_for_genre_profile(
+        genre_weights=genre_profile, n=n + len(picked_movie_ids), exclude_seen=False
+    )
+    picked = set(picked_movie_ids)
+    return [r for r in raw_recs if r.movie_id not in picked][:n]
+
+
 st.markdown(CINEMA_CSS, unsafe_allow_html=True)
 
 configure_kaggle_credentials_from_secrets()
@@ -414,9 +451,20 @@ with st.sidebar:
             "so this is the only way to see the cold-start path trigger live."
         ),
     )
+    picked_movie_ids: list[str] = []
     if simulate_cold:
         selected_user_id = COLD_START_USER_ID
-        st.info("Using a synthetic user with zero rating history.")
+        sorted_movie_ids = sorted(movie_id_to_title, key=lambda mid: movie_id_to_title[mid])
+        picked_movie_ids = st.multiselect(
+            "Movies you like (pick a few)",
+            options=sorted_movie_ids,
+            format_func=lambda mid: movie_id_to_title.get(mid, mid),
+            help="No rating history needed -- recommendations below update live from these picks.",
+        )
+        if picked_movie_ids:
+            st.caption(f"Personalizing from {len(picked_movie_ids)} pick(s).")
+        else:
+            st.caption("No picks yet -- showing overall trending movies until you pick a few.")
     else:
         rating_counts = train_df.groupby("user_id").size()
         user_ids = sorted(rating_counts.index.tolist())
@@ -448,7 +496,12 @@ if compare_mode:
         ("hybrid", "Hybrid \U0001f500"),
         ("popularity", "Popularity Baseline \U0001f4ca"),
     ]
-    panel_recs = {key: models[key].recommend_for_user(selected_user_id, n=n_recs) for key, _ in panel_order}
+    panel_recs = {}
+    for key, _ in panel_order:
+        if simulate_cold and key == "popularity":
+            panel_recs[key] = recommend_for_new_user(models["popularity"], movies_df, picked_movie_ids, n_recs)
+        else:
+            panel_recs[key] = models[key].recommend_for_user(selected_user_id, n=n_recs)
     needed_movie_ids = {rec.movie_id for recs in panel_recs.values() for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
 
@@ -465,7 +518,10 @@ if compare_mode:
         )
 else:
     st.subheader(f"Top {n_recs} recommendations for {user_label}")
-    recs = models["cold_start"].recommend_for_user(selected_user_id, n=n_recs)
+    if simulate_cold:
+        recs = recommend_for_new_user(models["popularity"], movies_df, picked_movie_ids, n_recs)
+    else:
+        recs = models["cold_start"].recommend_for_user(selected_user_id, n=n_recs)
     needed_movie_ids = {rec.movie_id for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
     render_recommendations(recs, movie_id_to_title, poster_map, st)

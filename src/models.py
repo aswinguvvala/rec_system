@@ -447,6 +447,39 @@ class PopularityRecommender(BaseRecommender):
         return results
 
 
+def genre_profile_from_movie_ids(
+    movie_ids: list[str], movies_df: pd.DataFrame, genre_columns: list[str] | None = None
+) -> np.ndarray | None:
+    """Build a genre-preference vector from a set of movies a user says they like.
+
+    This is the live-onboarding counterpart to
+    :meth:`ColdStartRecommender._genre_profile_for_user`: that one builds a
+    genre profile from a user's real *training ratings*; this one builds the
+    same kind of vector from movies a brand-new user just picked in the UI,
+    with no rating history at all -- e.g. the Streamlit app's "pick a few
+    movies you like" cold-start onboarding flow. Both feed the same consumer,
+    :meth:`PopularityRecommender.recommend_for_genre_profile`. Unlike the
+    training-data version, a live pick carries no rating to weight by (there
+    is no rating yet, just "I like this"), so each pick contributes an equal,
+    unweighted share to the profile.
+
+    Args:
+        movie_ids: IDs of movies the user picked as "movies I like".
+        movies_df: Movie metadata with one column per genre in ``genre_columns``.
+        genre_columns: Genre column names, in the order the returned vector
+            uses. Defaults to :data:`GENRE_COLUMNS`.
+
+    Returns:
+        A genre-preference vector in ``genre_columns`` order, or ``None`` if
+        none of ``movie_ids`` were found in ``movies_df``.
+    """
+    columns = genre_columns or GENRE_COLUMNS
+    matches = movies_df.loc[movies_df["movie_id"].isin(set(movie_ids)), columns]
+    if matches.empty:
+        return None
+    return matches.to_numpy(dtype=float).sum(axis=0)
+
+
 class HybridRecommender(BaseRecommender):
     """Combines content-based and SVD scores, weighted or switching.
 

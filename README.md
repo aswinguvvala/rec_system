@@ -149,6 +149,14 @@ the Streamlit app includes a "simulate a brand-new user" toggle (a sentinel `use
 absent from training data) — it's the only way to see this path trigger against real
 model state instead of just trusting the unit tests.
 
+That toggle also powers **live cold-start onboarding**: pick a few real movies you
+like from the catalog, and the app turns those picks into a genre-preference vector
+(`genre_profile_from_movie_ids`) and re-ranks recommendations from it in real time —
+no rating history required, no model retraining, no changes to the recommender
+architecture at all. `PopularityRecommender.recommend_for_genre_profile` already
+blended popularity with genre affinity for the training-data cold-start path; this
+just feeds it live picks instead.
+
 ### Why the hybrid doesn't win here (and why that's still a real result)
 
 On MovieLens, blending content-based similarity into SVD improved ranking quality even
