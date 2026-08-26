@@ -5,7 +5,7 @@ filtering, a from-scratch SVD collaborative filter, a weighted hybrid of the two
 an explicit cold-start fallback for new users and unrated movies — all wrapped in a
 Streamlit demo that shows which model actually served each recommendation.
 
-**Live demo:** _coming soon — added here after deployment._
+**Live demo:** https://aswin-hybrid-movie-recommender.streamlit.app/
 
 ## Problem statement
 
@@ -21,10 +21,11 @@ the cold-start fallback an explicit, testable code path instead of scattered
 
 ## Screenshot
 
-_Not yet captured — this session didn't have browser access to take one. The app was
-verified headlessly with Streamlit's `AppTest` harness instead (see "Design Decisions"
-below). Run `streamlit run app.py` locally and drop a screenshot in `screenshots/` to
-fill this in._
+![Side-by-side comparison of all four recommenders for a sample user](screenshots/side-by-side-comparison.jpg)
+
+The "compare side-by-side" view — each column is a different model serving the same
+user, tagged with the `source` it actually ran under (`content`, `svd`, `hybrid`,
+`cold_start`).
 
 ## Architecture
 

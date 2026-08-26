@@ -102,9 +102,10 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   table (pulled from `results/metrics.json`, not placeholders), Design Decisions
   section (SVD choice, split choice, cold-start wrapper, "why hybrid despite SVD
   winning RMSE"), run-locally instructions, project structure, tech stack.
-- Screenshot NOT captured -- browser extension access was declined this session, so
-  there was no way to take one. README says so explicitly rather than faking it or
-  omitting the caveat. Revisit with `/chrome` if a real screenshot is wanted later.
+- Screenshot captured in a later session (browser access available then): real
+  side-by-side comparison view from the live deploy, saved to
+  `screenshots/side-by-side-comparison.jpg` and linked from the README. Supersedes
+  the earlier "not yet captured" note below (left for history).
 - Fixed `.gitignore`: removed the `results/*.json` exclusion. That file is small and
   is the actual "real numbers" artifact the README and a fresh deploy both depend on
   -- gitignoring it would force every fresh clone/deploy to either show no metrics or
@@ -135,9 +136,36 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   `AppTest` -> auto-downloaded MovieLens 100K and rendered with zero exceptions. This
   supersedes the earlier manual-file-mirror simulation noted in Phase 6 (that was a
   workaround for git not existing yet; no longer needed, but left below as history).
-- No remote configured -- repo has not been pushed anywhere yet. That's the next step
-  whenever the user is ready to deploy (Streamlit Community Cloud / HF Spaces need a
-  GitHub remote).
+- Pushed to GitHub: https://github.com/aswinguvvala/rec_system, remote `origin` over
+  HTTPS (no SSH key on this machine; Git Credential Manager handles auth and already
+  had cached credentials for `aswinguvvala`, so push required no interactive login).
+  Local branch renamed `master` -> `main` to match GitHub's default and pushed with
+  `-u` so `main` tracks `origin/main`.
+
+## Deployment status
+- Live demo deployed on Streamlit Community Cloud (already had an `aswinguvvala`
+  account, logged in): https://aswin-hybrid-movie-recommender.streamlit.app/ , from
+  `aswinguvvala/rec_system` branch `main`, main file `app.py`. Python version pinned
+  to 3.12 in Streamlit's advanced settings (not the 3.14 default) to match the
+  versions `requirements.txt` was actually tested against.
+  `hybrid-movie-recommender` was taken as a subdomain; used
+  `aswin-hybrid-movie-recommender` instead.
+- Verified end-to-end from the real build log, not assumed: Python 3.12.14 venv, all
+  pinned deps installed clean via uv, MovieLens 100K downloaded and split
+  (80,367/19,633, matches local run), all 5 models fit, UI renders real hybrid
+  recommendations with source badges for the default user. Total cold-start time
+  ~2 minutes (first load only -- `st.cache_resource` covers later loads on the same
+  instance).
+- Real perf issue found in that log, not yet fixed: `HybridRecommender.fit()` and the
+  cold-start wrapper each internally re-fit their own fresh
+  `ContentBasedRecommender`/`SVDRecommender` instead of reusing the already-fitted
+  ones `app.py`'s `load_models` builds first -- so SVD's ~20-epoch training loop runs
+  3x on every cold start instead of once. Functionally correct, just wasteful; worth
+  refactoring `HybridRecommender`/`ColdStartRecommender` to accept pre-fitted
+  sub-models next time `src/models.py` is touched.
+- No custom `runtime.txt`/`.python-version` file added to the repo -- the Python
+  3.12 pin lives only in Streamlit Cloud's app settings. Fine for this single
+  deployment target, but if a second host is ever added it won't inherit the pin.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
