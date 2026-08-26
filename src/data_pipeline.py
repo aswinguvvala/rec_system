@@ -34,6 +34,7 @@ Run standalone with ``python -m src.data_pipeline``.
 from __future__ import annotations
 
 import json
+import socket
 import string
 from pathlib import Path
 
@@ -45,6 +46,10 @@ from src.utils import PROCESSED_DATA_DIR, RAW_DATA_DIR, ensure_dir, get_logger
 logger = get_logger(__name__)
 
 KAGGLE_DATASET = "snathjr/indian-regional-movie"
+# The kaggle package doesn't reliably apply its own per-request timeout across versions
+# (see download_indian_movies_dataset) -- this bounds how long a stalled Kaggle API call
+# can silently hang the whole app before failing with an actionable error instead.
+KAGGLE_SOCKET_TIMEOUT_SECONDS = 30
 
 # The dataset's real, discovered genre vocabulary (21 genres; see claude.md
 # for how this was determined). Movies with no listed genre -- about a
@@ -110,22 +115,32 @@ def download_indian_movies_dataset(dest_dir: Path = RAW_DATA_DIR) -> Path:
         return extracted_dir
 
     ensure_dir(extracted_dir)
+    logger.info("Downloading %s from Kaggle (this may take a moment)...", KAGGLE_DATASET)
+    # The kaggle package's own HTTP calls (both its own import-time auth attempt and
+    # dataset_download_files below) don't take an explicit per-request timeout in every
+    # version, so a slow/unreachable Kaggle endpoint can hang this call indefinitely with
+    # no error and no log output -- silently wedging the whole app. socket.setdefaulttimeout
+    # is a blunt instrument (process-wide), so it's set right before this specific network
+    # operation and restored immediately after, rather than left on for the app's lifetime.
+    previous_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(KAGGLE_SOCKET_TIMEOUT_SECONDS)
     try:
         import kaggle  # local import: importing this module authenticates as a side effect
 
         kaggle.api.authenticate()
-        logger.info("Downloading %s from Kaggle", KAGGLE_DATASET)
         kaggle.api.dataset_download_files(KAGGLE_DATASET, path=str(extracted_dir), unzip=True)
     except Exception as exc:  # noqa: BLE001 - the kaggle package doesn't expose a small, stable
         # set of exception types across versions for "no credentials" vs. "network failure" vs.
-        # "dataset moved"; all three surface as generic exceptions, so this boundary is
-        # intentionally broad. What matters is that the resulting message stays actionable.
+        # "dataset moved" vs. "timed out"; all surface as generic exceptions, so this boundary
+        # is intentionally broad. What matters is that the resulting message stays actionable.
         raise DataDownloadError(
             f"Failed to download the Indian movie dataset ({KAGGLE_DATASET}) from Kaggle: {exc}. "
             "Make sure a Kaggle API token is configured at ~/.kaggle/kaggle.json (or the "
             "KAGGLE_USERNAME/KAGGLE_KEY env vars) -- get a free one at "
             "https://www.kaggle.com/settings under 'API'."
         ) from exc
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
 
     if not (extracted_dir / "ratings.json").exists():
         raise DataDownloadError(

@@ -347,6 +347,31 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   files exist" is unsafe across any change to what those files are expected to
   contain, not just across dataset swaps -- worth a second look if this pipeline's
   processed-CSV schema changes again for any reason.
+- **Second real issue hit on redeploy, after the cache fix**: pushing the cache fix
+  didn't actually fix the live app -- it kept showing the same stale error. Root
+  cause: Streamlit Cloud's git-triggered redeploy for a Python-only change (no new
+  dependency) doesn't restart the underlying process, so `load_data()`'s
+  `st.cache_data` result from the *first* bad run stayed pinned in memory and
+  `run_pipeline` (my fix included) never ran again. Forced a real fix via the
+  Cloud dashboard's app menu -> **Reboot** (not just another git push) -- confirmed
+  via the logs this does a genuine fresh container (full re-clone, full dependency
+  reinstall from scratch, "Uvicorn server started" from zero), unlike a normal
+  redeploy. After that reboot, the app hung completely -- zero log output for over a
+  minute, not even the pipeline's own first log line, with the CSS/hero rendering
+  fine (proving the script started) but never reaching a rendered spinner. Suspected
+  (not fully confirmed) cause: the `kaggle` package's own network calls
+  (`kaggle.api.authenticate()`, `dataset_download_files()`) don't reliably apply a
+  request timeout across versions, so a slow/unreachable hop to Kaggle's API from
+  that specific container could hang indefinitely with no error and no log output --
+  unlike every TMDb call in `src/posters.py`, which has always had an explicit
+  `REQUEST_TIMEOUT_SECONDS`. Fixed defensively regardless of full confirmation:
+  `download_indian_movies_dataset` now wraps just that network call in
+  `socket.setdefaulttimeout(KAGGLE_SOCKET_TIMEOUT_SECONDS)` (30s), restored in a
+  `finally` right after, so a stalled Kaggle call now fails fast with an actionable
+  `DataDownloadError` instead of silently wedging the whole app. Verified locally
+  with a genuinely fresh raw-data cache (moved `data/raw/indian_movies` and
+  `data/processed` aside first) that this doesn't slow down or break the real,
+  successful download path: ~4.8s end-to-end, unchanged from before the fix.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
