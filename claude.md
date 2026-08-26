@@ -122,10 +122,11 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   hybrid=gold, cold_start=red) and real posters, and the cold-start simulated-user path
   still correctly shows the raw content/SVD/hybrid columns empty while Popularity
   Baseline populates with real posters. No exceptions in any state.
-- README's screenshot (`screenshots/side-by-side-comparison.jpg`) predates this
-  redesign and now shows the old plain-text UI -- needs to be recaptured once the live
-  Streamlit Cloud app has the TMDb secret set, so the recaptured screenshot shows real
-  posters rather than placeholders.
+- The user pasted the TMDb key into the deployed app's Streamlit Cloud secrets
+  themselves (Claude never touched that form, per the policy above). Confirmed live:
+  the deployed app rebuilt and now renders real posters. README's screenshot
+  (`screenshots/side-by-side-comparison.jpg`) was recaptured from the live deploy at
+  this point, superseding the placeholder-era one from Phase 6.
 
 ## Tests status (Phase 5)
 - 41 tests across `tests/test_data_pipeline.py`, `tests/test_models.py`,
