@@ -472,6 +472,40 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   live in the browser with real picks that the fix renders correctly.
   Sidebar caption updated to say picks are "matched by genre and language" so
   this isn't a silent behavior change.
+- **Fourth caching-related deploy break, same root cause pattern as Phase 7's
+  first two, in a different cache**: pushed the language fix, and the *first*
+  "no picks yet" load crashed with `TypeError:
+  PopularityRecommender.recommend_for_genre_profile() got an unexpected keyword
+  argument 'candidate_movie_ids'`. `app.py` was running the new code (it called
+  the new kwarg); the `st.cache_resource`-cached `models["popularity"]` object
+  was still an instance of the *old* `PopularityRecommender` class. Root cause:
+  `load_models()`'s own source didn't change (it just calls `PopularityRecommender()`
+  and `.fit()`, same as always), so Streamlit's cache_resource -- which hashes the
+  *decorated function's own source*, not anything it transitively calls -- saw an
+  unchanged hash and kept serving the stale cached object across what the deploy
+  log showed as a soft update (dependencies unchanged -> no process restart, same
+  pattern first seen in Phase 7). Fixed the same way as before: an explicit Reboot
+  from the Cloud dashboard forces a truly fresh process, unconditionally clearing
+  every `st.cache_resource`/`st.cache_data` entry regardless of the hash they were
+  stored under.
+  **General lesson, now confirmed across two different caches (an on-disk
+  processed-data cache in Phase 7, and this in-memory `st.cache_resource` model
+  cache)**: any time a class/function's *signature* changes but the
+  `st.cache_resource`/`st.cache_data`-decorated function that constructs/calls it
+  does not, assume the old cached object can survive a plain git push on Streamlit
+  Cloud -- verify with a real "zero state" interaction after every deploy that
+  touches a class instantiated inside a cached function, not just a happy-path
+  check, and reach for an explicit Reboot rather than re-pushing when something
+  that works locally breaks only on the live deploy.
+- Re-verified live after the Reboot with the user's exact scenario, in the
+  browser, not just re-checked the error went away: zero picks -> no crash, pure
+  trending as expected; picked "1 - Nenokkadine" alone -> already all-Telugu
+  results; added "#Pellichoopulu" as a second pick -> all 10 recommendations
+  Telugu/Tamil titles (Dil Se.., Magadheera, Bommarillu, Shankarabharanam, Sagara
+  Sangamam, Mudhalvan, Sri Krishnarjuna Yudham, Minnale, ...) with matching
+  Telugu-script poster art. Both real bugs from this feature -- the language-blind
+  ranking and the stale-cache TypeError -- are confirmed fixed on the live site,
+  not just locally.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
