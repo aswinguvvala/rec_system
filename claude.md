@@ -79,10 +79,63 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   imports inside `app.py` fail with `ModuleNotFoundError` (this is a test-harness-only
   issue; the real `streamlit run` server is unaffected).
 
+## UI redesign (Phase 4b)
+- Original `app.py` UI was plain text (no images, default Streamlit look). Redesigned
+  to a dark "cinema" theme after the user compared it unfavorably to another of their
+  Streamlit projects (`spacee_rag`) and asked for real movie images.
+- `.streamlit/config.toml` sets the base dark theme (colors, primaryColor gold
+  `#e3b23c`) for native widgets -- the officially supported mechanism, more robust
+  across Streamlit versions than overriding every internal `data-testid` class. This
+  file MUST stay git-tracked; `.gitignore` used to blanket-ignore `.streamlit/`, which
+  would have silently dropped it -- narrowed to ignore only `.streamlit/secrets.toml`.
+  `app.py` layers bespoke CSS on top (`CINEMA_CSS` constant): Google Fonts (Bebas Neue
+  display, Inter body, IBM Plex Mono labels), a hero section, movie-card grid, and a
+  procedural film-strip background (sprocket-hole perforation bars along the top/bottom
+  of the viewport via `repeating-radial-gradient`, plus a warm radial "spotlight"
+  behind the hero) -- deliberately not a real photo, to avoid using copyrighted movie
+  imagery on a public page; same technique `spacee_rag` uses for its CSS-drawn
+  starfield, just a cinema motif instead of a space one.
+- Real poster images: new `src/posters.py` module looks up posters via the TMDb API
+  (`GET /search/movie` by title, with MovieLens's relocated-article titles like
+  `"Truth About Cats & Dogs, The (1996)"` normalized back to natural order before
+  searching -- see `_normalize_title`). `get_poster_urls` parallelizes lookups with a
+  `ThreadPoolExecutor` and de-dupes titles. Pure `requests`-based I/O, no Streamlit
+  dependency, so it's independently unit-testable per the single-responsibility
+  convention. `app.py` wraps it in `st.cache_data`.
+- The API key is fully optional and never hardcoded: `get_tmdb_api_key()` in `app.py`
+  checks `TMDB_API_KEY` env var first, then `st.secrets`, and returns `None` on any
+  failure. No key -> every card falls back to a styled placeholder (gradient box +
+  film emoji + title) instead of a real poster; the app still runs and looks
+  intentional either way. A muted one-line hint under the hero says so when no key is
+  configured, rather than silently degrading.
+- Local secret: `.streamlit/secrets.toml` holds `TMDB_API_KEY` for local runs (the
+  user's real key, obtained free from themoviedb.org). Gitignored, never committed.
+  **The deployed Streamlit Cloud app's secret was deliberately NOT set by Claude** --
+  entering API keys into a web form is outside what Claude will do via browser
+  automation regardless of user authorization; the user needs to paste it themselves
+  into Manage app -> Settings -> Secrets on share.streamlit.io. Until that's done, the
+  live demo shows placeholder posters (still fully functional, just not real artwork).
+- Verified live locally (not just headlessly): `streamlit run app.py` with the real
+  TMDb key in `secrets.toml`, driven with the browser tool -- confirmed real posters
+  render for all 10 default-user recommendations, the 4-column side-by-side compact
+  cards render with correct per-source badge colors (content=teal, svd=violet,
+  hybrid=gold, cold_start=red) and real posters, and the cold-start simulated-user path
+  still correctly shows the raw content/SVD/hybrid columns empty while Popularity
+  Baseline populates with real posters. No exceptions in any state.
+- README's screenshot (`screenshots/side-by-side-comparison.jpg`) predates this
+  redesign and now shows the old plain-text UI -- needs to be recaptured once the live
+  Streamlit Cloud app has the TMDb secret set, so the recaptured screenshot shows real
+  posters rather than placeholders.
+
 ## Tests status (Phase 5)
 - 41 tests across `tests/test_data_pipeline.py`, `tests/test_models.py`,
   `tests/test_evaluate.py`. All green via both `pytest tests/ -v` and
   `python -m pytest tests/ -v`.
+- Phase 4b added `tests/test_posters.py` (13 tests: title normalization including the
+  relocated-article case, single lookups, batch/dedup behavior, and graceful handling
+  of a missing key / no results / a bad poster_path / a network failure / an HTTP error
+  status -- everything returns `None`/best-effort instead of raising). 54 tests total,
+  all green.
 - Added `pyproject.toml` with `[tool.pytest.ini_options] pythonpath = ["."]` so bare
   `pytest` (not just `python -m pytest`) resolves `from src...` imports -- without it,
   pytest's default import-mode only puts `tests/` itself on `sys.path`, not the
@@ -191,7 +244,8 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
 - `src/data_pipeline.py` — download/cache MovieLens 100K, clean, split
 - `src/models.py` — `ContentBasedRecommender`, `SVDRecommender`, `HybridRecommender`, cold-start fallback wrapper
 - `src/evaluate.py` — RMSE/MAE plus Precision@K, Recall@K, NDCG@K
-- `app.py` — Streamlit demo; must run standalone from a fresh clone with no manual setup beyond `pip install`
+- `src/posters.py` — optional TMDb poster-image lookup by title; no Streamlit dependency
+- `app.py` — Streamlit demo; must run standalone from a fresh clone with no manual setup beyond `pip install`. Also owns the cinema theme's bespoke CSS (`.streamlit/config.toml` sets the base widget theme)
 
 ## Do not
 - Don't commit `data/` (raw MovieLens files) — it's gitignored and re-downloaded on first run
