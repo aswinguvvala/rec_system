@@ -199,6 +199,15 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   `-u` so `main` tracks `origin/main`.
 
 ## Deployment status
+- **Superseded by Phase 7's redeploy against the Indian Regional Movie Dataset (see
+  that section for the full story, including two real bugs found and fixed only on
+  the live deploy: a stale-cache issue and a Kaggle-secrets bridging issue) -- left
+  below for history.** As of Phase 7: live demo confirmed working end-to-end at the
+  same URL, with real Bollywood titles/posters rendering in both single and
+  side-by-side view, and the cold-start path confirmed correct. Getting there required
+  three explicit Reboots from the Cloud dashboard (not just git pushes) -- see Phase 7
+  for why a plain push doesn't always pick up a fix that touches cached-at-runtime
+  state. `KAGGLE_USERNAME`/`KAGGLE_KEY` are now Cloud secrets alongside `TMDB_API_KEY`.
 - Live demo deployed on Streamlit Community Cloud (already had an `aswinguvvala`
   account, logged in): https://aswin-hybrid-movie-recommender.streamlit.app/ , from
   `aswinguvvala/rec_system` branch `main`, main file `app.py`. Python version pinned
