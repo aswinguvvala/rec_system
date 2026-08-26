@@ -331,6 +331,53 @@ class SVDRecommender(BaseRecommender):
                 break
         return results
 
+    def similar_items(self, movie_id: str, n: int = 10) -> list[Recommendation]:
+        """Return the ``n`` movies most similar to ``movie_id`` by learned collaborative factors.
+
+        The collaborative counterpart to
+        :meth:`ContentBasedRecommender.similar_items`: two movies end up with
+        similar item-factor vectors when the users who rated one tended to
+        rate the other similarly, independent of genre -- a "people who liked
+        this also liked that" signal genre similarity can't provide on its
+        own. Used to build a real similar-to-your-picks recommendation for
+        cold-start onboarding (see :func:`recommend_similar_to_picks`) instead
+        of only ever blending overall popularity with one aggregated genre
+        profile.
+
+        Only available for movies that appeared in the training data at least
+        once -- roughly half this dataset's catalog never received a training
+        rating at all (see ``claude.md``), so this returns ``[]`` for those,
+        the same "no signal, no crash" convention :meth:`predict` already uses
+        for unseen items, rather than fabricating a collaborative signal that
+        doesn't exist.
+
+        Args:
+            movie_id: Raw movie ID to find neighbors for.
+            n: Number of similar movies to return.
+
+        Returns:
+            Up to ``n`` :class:`Recommendation` objects (``source="svd"``),
+            most similar first.
+        """
+        idx = self._item_id_to_idx.get(movie_id)
+        if idx is None or self._Q is None or self._item_ids is None:
+            return []
+        item_vec = self._Q[idx]
+        item_norm = np.linalg.norm(item_vec)
+        if item_norm < 1e-12:
+            return []
+        norms = np.linalg.norm(self._Q, axis=1)
+        sims = (self._Q @ item_vec) / (norms * item_norm + 1e-12)
+        ranked_idx = np.argsort(-sims)
+        results: list[Recommendation] = []
+        for i in ranked_idx:
+            if i == idx:
+                continue
+            results.append(Recommendation(movie_id=str(self._item_ids[i]), score=float(sims[i]), source="svd"))
+            if len(results) >= n:
+                break
+        return results
+
 
 class PopularityRecommender(BaseRecommender):
     """Popularity baseline -- also used as the cold-start fallback.
@@ -489,21 +536,57 @@ def genre_profile_from_movie_ids(
         movie_ids: IDs of movies the user picked as "movies I like".
         movies_df: Movie metadata with one column per genre in ``genre_columns``.
         genre_columns: Genre column names, in the order the returned vector
-            uses. Defaults to :data:`GENRE_COLUMNS`.
+            uses. Defaults to whichever of :data:`GENRE_COLUMNS` are actually
+            present in ``movies_df`` (mirrors ``PopularityRecommender.fit``'s
+            own defaulting, so this stays robust to a ``movies_df`` that
+            doesn't carry every genre column -- e.g. a smaller test fixture,
+            or a future dataset swap with a different genre set).
 
     Returns:
         A genre-preference vector in ``genre_columns`` order, or ``None`` if
         none of ``movie_ids`` were found in ``movies_df``.
     """
-    columns = genre_columns or GENRE_COLUMNS
+    columns = genre_columns or [c for c in GENRE_COLUMNS if c in movies_df.columns]
     matches = movies_df.loc[movies_df["movie_id"].isin(set(movie_ids)), columns]
     if matches.empty:
         return None
     return matches.to_numpy(dtype=float).sum(axis=0)
 
 
+def _primary_language(cell: object) -> str | None:
+    """Extract a movie's primary (first-listed) language from its ``languages`` cell.
+
+    The ``languages`` column lists every language a title was released or dubbed
+    in, in the order the source data gave them, with no explicit "this one is
+    the original" flag -- but spot-checking well-known films against this
+    dataset shows the first entry reliably *is* the original/primary industry:
+    "Dil Se.." (a Hindi film dubbed into Telugu, Tamil, Urdu, and Assamese for
+    wider release) lists ``"Hindi, Urdu, Assamese, Tamil, Telugu"``; "Baahubali:
+    The Beginning" and "Eega" (both Telugu productions) list Telugu first even
+    though they were dubbed into many more languages than Dil Se.. was.
+
+    This matters because :func:`movie_ids_matching_languages` used to match on
+    *any* shared language, and a handful of massively-popular, widely-dubbed
+    Hindi hits like Dil Se.. kept slipping back into "Telugu-matched" results
+    that way -- technically true (Telugu is one of its five language tags) but
+    not what a user picking Telugu films actually wants. Matching on primary
+    language only fixes that while barely shrinking the real candidate pool
+    (in this dataset, Telugu-primary is 297 movies vs. 338 Telugu-anywhere).
+
+    Args:
+        cell: A ``languages`` column value, e.g. ``"Telugu, Tamil"``.
+
+    Returns:
+        The first language, or ``None`` if ``cell`` is empty/not a string.
+    """
+    if not isinstance(cell, str) or not cell:
+        return None
+    first = cell.split(",")[0].strip()
+    return first or None
+
+
 def movie_ids_matching_languages(movie_ids: list[str], movies_df: pd.DataFrame) -> set[str] | None:
-    """Find every catalog movie sharing at least one language with the given movies.
+    """Find every catalog movie whose primary language matches the given movies'.
 
     Exists because genre affinity alone is language-blind: this dataset's 21
     genres (Action, Comedy, Drama, ...) say nothing about which of its 18
@@ -513,8 +596,14 @@ def movie_ids_matching_languages(movie_ids: list[str], movies_df: pd.DataFrame) 
     since a handful of blockbuster hits in the catalog's dominant language
     outrank almost everything else on raw rating counts alone. Meant to be
     used as :meth:`PopularityRecommender.recommend_for_genre_profile`'s
-    ``candidate_movie_ids``, narrowing the ranked pool to same-language films
-    before popularity and genre affinity ever come into it.
+    ``candidate_movie_ids``, narrowing the ranked pool to same-primary-language
+    films before popularity and genre affinity ever come into it.
+
+    Matches on *primary* language (see :func:`_primary_language`), not any
+    language a title happens to be tagged with -- matching on any shared tag
+    let widely-dubbed Hindi blockbusters slip back into results for someone
+    who picked only Telugu films, since being dubbed into Telugu was enough
+    to "share a language" even though the film isn't Telugu cinema.
 
     Args:
         movie_ids: IDs of movies to read the "wanted" language(s) from --
@@ -524,27 +613,19 @@ def movie_ids_matching_languages(movie_ids: list[str], movies_df: pd.DataFrame) 
 
     Returns:
         Set of matching movie ids (this always includes the input
-        ``movie_ids`` themselves, since a film trivially shares a language
-        with itself), or ``None`` if none of ``movie_ids`` had any parsed
-        language info at all -- callers should treat ``None`` as "can't
-        narrow by language" and fall back to the unrestricted catalog rather
-        than recommending nothing.
+        ``movie_ids`` themselves, since a film trivially matches its own
+        primary language), or ``None`` if none of ``movie_ids`` had any
+        parsed language info at all -- callers should treat ``None`` as
+        "can't narrow by language" and fall back to the unrestricted catalog
+        rather than recommending nothing.
     """
-
-    def _split(cell: object) -> set[str]:
-        if not isinstance(cell, str) or not cell:
-            return set()
-        return {lang.strip() for lang in cell.split(",") if lang.strip()}
-
     picked = movies_df.loc[movies_df["movie_id"].isin(set(movie_ids)), "languages"]
-    wanted_languages: set[str] = set()
-    for cell in picked:
-        wanted_languages |= _split(cell)
+    wanted_languages = {lang for cell in picked if (lang := _primary_language(cell))}
     if not wanted_languages:
         return None
 
-    matches_mask = movies_df["languages"].apply(lambda cell: bool(_split(cell) & wanted_languages))
-    return set(movies_df.loc[matches_mask, "movie_id"])
+    primary = movies_df["languages"].apply(_primary_language)
+    return set(movies_df.loc[primary.isin(wanted_languages), "movie_id"])
 
 
 class HybridRecommender(BaseRecommender):
@@ -654,6 +735,118 @@ def _min_max_normalize(scores: dict[str, float]) -> dict[str, float]:
     if hi - lo < 1e-9:
         return {k: 0.5 for k in scores}
     return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
+
+
+def recommend_similar_to_picks(
+    picked_movie_ids: list[str],
+    content_model: ContentBasedRecommender,
+    svd_model: SVDRecommender,
+    popularity_model: PopularityRecommender,
+    movies_df: pd.DataFrame,
+    n: int = 10,
+    neighbors_per_pick: int = 50,
+    alpha: float = 0.5,
+) -> list[Recommendation]:
+    """Recommend movies genuinely similar to a set of picks -- content AND collaborative.
+
+    This exists because the simpler cold-start path
+    (:meth:`PopularityRecommender.recommend_for_genre_profile`) blends overall
+    popularity with *one* genre-preference vector aggregated across every
+    pick -- it never actually asks "what's similar to this specific movie the
+    user picked", and it has no collaborative signal ("people who rated
+    similar movies the way others did also liked these") at all. This
+    function answers both, by looking up each pick's real nearest neighbors
+    from two independent recommenders already in this module:
+
+    * :meth:`ContentBasedRecommender.similar_items` -- genre overlap with
+      this specific pick.
+    * :meth:`SVDRecommender.similar_items` -- learned rating-pattern
+      similarity to this specific pick. Only available for picks with at
+      least one training rating (roughly half this dataset's catalog has
+      none at all -- see ``claude.md`` -- so a niche/unrated pick
+      legitimately contributes content signal only, rather than a fabricated
+      collaborative one).
+
+    A candidate's content/collaborative score is its *best* (max) similarity
+    to any single pick, not a score against one blended profile -- scoring
+    each pick individually is what actually answers "is this similar to
+    something they picked"; averaging into one profile first can wash out a
+    strong match to just one distinctive pick among several. The two signals
+    are min-max normalized and blended by ``alpha``, the same
+    normalize-then-blend approach :class:`HybridRecommender` already uses for
+    content vs. SVD at the user level -- this is that same idea applied at
+    the item level. Movies neither signal ever surfaces (rare, but possible
+    for very niche picks) are backfilled with language-restricted popularity
+    so the result doesn't fall short of ``n`` just because the neighbor
+    search came up thin.
+
+    Args:
+        picked_movie_ids: IDs of movies the user picked as "movies I like".
+        content_model: A fitted :class:`ContentBasedRecommender`.
+        svd_model: A fitted :class:`SVDRecommender`.
+        popularity_model: A fitted :class:`PopularityRecommender`, used only
+            to backfill if the two similarity signals together don't surface
+            enough candidates.
+        movies_df: Movie metadata, for the popularity backfill's genre/language
+            profile (see :func:`genre_profile_from_movie_ids` and
+            :func:`movie_ids_matching_languages`).
+        n: Number of recommendations to return.
+        neighbors_per_pick: How many nearest neighbors to fetch per pick per
+            signal, before aggregating and filtering the picks back out.
+        alpha: Weight on the collaborative score in the blend, in [0, 1].
+            The content score gets ``1 - alpha``.
+
+    Returns:
+        Up to ``n`` :class:`Recommendation` objects, ranked by the blended
+        content/collaborative score (``source="hybrid"``) with any popularity
+        backfill (``source="cold_start"``) ranked after. None of them are the
+        user's own picks.
+    """
+    picked = set(picked_movie_ids)
+    content_scores: dict[str, float] = {}
+    collab_scores: dict[str, float] = {}
+
+    for pick in picked_movie_ids:
+        for rec in content_model.similar_items(pick, n=neighbors_per_pick):
+            if rec.movie_id in picked:
+                continue
+            content_scores[rec.movie_id] = max(content_scores.get(rec.movie_id, -1.0), rec.score)
+        for rec in svd_model.similar_items(pick, n=neighbors_per_pick):
+            if rec.movie_id in picked:
+                continue
+            collab_scores[rec.movie_id] = max(collab_scores.get(rec.movie_id, -1.0), rec.score)
+
+    candidates = set(content_scores) | set(collab_scores)
+    results: list[Recommendation] = []
+    if candidates:
+        content_norm = _min_max_normalize(content_scores)
+        collab_norm = _min_max_normalize(collab_scores)
+        blended = {
+            mid: alpha * collab_norm.get(mid, 0.0) + (1 - alpha) * content_norm.get(mid, 0.0)
+            for mid in candidates
+        }
+        ranked = sorted(blended.items(), key=lambda kv: -kv[1])
+        results = [Recommendation(movie_id=mid, score=score, source="hybrid") for mid, score in ranked]
+
+    if len(results) < n:
+        already = picked | {r.movie_id for r in results}
+        language_candidates = movie_ids_matching_languages(picked_movie_ids, movies_df)
+        genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
+        backfill = popularity_model.recommend_for_genre_profile(
+            genre_weights=genre_profile,
+            n=(n - len(results)) + len(already),
+            exclude_seen=False,
+            candidate_movie_ids=language_candidates,
+        )
+        for rec in backfill:
+            if rec.movie_id in already:
+                continue
+            results.append(rec)
+            already.add(rec.movie_id)
+            if len(results) >= n:
+                break
+
+    return results[:n]
 
 
 class ColdStartRecommender(BaseRecommender):

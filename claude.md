@@ -507,6 +507,75 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   ranking and the stale-cache TypeError -- are confirmed fixed on the live site,
   not just locally.
 
+## Live cold-start onboarding, round 2: primary language, then real similarity (Phase 9)
+- **"Dil Se.." bug**: user asked directly "are the recommendations correct?" after
+  Phase 8 shipped. Diagnosed with real data rather than assuming the language fix
+  was sufficient: `movie_ids_matching_languages` matched on *any* shared language
+  tag in the comma-joined `languages` column, so a famous Hindi film dubbed into
+  Telugu among 4 other languages (`"Telugu, Hindi, Tamil, ..."`-style cell) slipped
+  into "Telugu-picked" results even though Hindi is its actual industry/language.
+  Spot-checked 7 well-known films and confirmed the *first*-listed language reliably
+  indicates the true original industry in this dataset. Fixed with new
+  `_primary_language()` helper (extracts the first comma-separated entry) and
+  rewrote `movie_ids_matching_languages` to match on primary language only, not any
+  shared tag. Verified with the real fitted model: Dil Se.. now excluded, all 10
+  results for the Telugu picks genuinely Telugu-primary.
+- **The bigger gap, raised by the user directly**: "why are we recommending these
+  movies... they should be similar... or other users may have liked similar
+  movies." Even language-correct, Phase 8's ranking was really just "popularity,
+  restricted to one aggregated genre-affinity vector across all picks blended
+  together" -- never checked whether any specific recommended movie was actually
+  similar to any specific picked movie, and had no collaborative-filtering signal
+  at all (the "S" in SVD was completely unused for onboarding). Two real,
+  pre-existing model capabilities were sitting unused: `ContentBasedRecommender
+  .similar_items()` (genre-based item-item cosine similarity) already existed but
+  was never called from the cold-start path; `SVDRecommender` had no item-item
+  method at all.
+  Added `SVDRecommender.similar_items()` (new, in `src/models.py`): cosine
+  similarity over the learned item-factor matrix `Q`, i.e. genuine "users who
+  rated similar movies similarly to how they rated this one" collaborative
+  signal, excluding the query movie itself and returning `[]` for a movie with no
+  training ratings (~51% of the catalog) rather than fabricating one.
+  Added `recommend_similar_to_picks()` (new, in `src/models.py`): for each
+  individual pick (not one aggregated blob), fetches real neighbors from both
+  `ContentBasedRecommender.similar_items` and `SVDRecommender.similar_items`,
+  takes the max score per candidate across all picks, min-max normalizes each
+  signal independently and blends them (default `alpha=0.5`) -- the same
+  normalize-then-weight pattern `HybridRecommender` already uses at the
+  user level, just applied at the item level here. Falls back to the existing
+  language-restricted popularity ranking (`movie_ids_matching_languages` +
+  `genre_profile_from_movie_ids`) only as a backfill when fewer than `n`
+  real neighbors are found (e.g. all picks are catalog-unknown or otherwise
+  signal-free) -- language is now a backfill signal, not the primary axis.
+  `app.py`'s `recommend_for_new_user` now delegates to this for any non-empty
+  pick list; zero picks is still pure trending popularity, unchanged. Compare-mode's
+  4th panel label is now dynamic: "Similar To Your Picks" when simulating with
+  real picks, "Popularity Baseline" otherwise (source tag is `"hybrid"` for
+  similarity-based results, `"cold_start"` for a popularity backfill).
+  4 new tests in `TestRecommendSimilarToPicks` plus 2 in `TestSVDRecommender`
+  for the new `similar_items` method.
+  Found and fixed one real bug while writing tests: `genre_profile_from_movie_ids`
+  defaulted its genre-column list to the full production `GENRE_COLUMNS` constant
+  unconditionally, unlike `PopularityRecommender.fit()`'s existing pattern of
+  intersecting with whatever columns `movies_df` actually has -- harmless in
+  production (real `movies_df` always has every column) but would `KeyError` on
+  any smaller/different schema. Fixed to intersect the same way, for consistency
+  and future-dataset-swap robustness.
+  Verified against the user's *exact* three Telugu picks with the real fitted
+  model, both via a standalone script and live in the browser (single-view and
+  compare-mode): results are no longer pure popularity but genuine per-pick
+  neighbors -- e.g. for "1 - Nenokkadine" alone, top content neighbor was C.I.D.
+  (exact genre match) and top collaborative neighbors included Prasthanam, 1971,
+  Aligarh (verified these are real SVD item-factor nearest-neighbors, not
+  coincidence, by printing the raw `similar_items` output). With all three picks,
+  top results (Ninne Pelladatha, Hungama, Wake Up Sid) score above a visible
+  tie-plateau at 0.500 -- confirmed this plateau is real, legitimate behavior
+  (multiple catalog movies sharing an *exact* genre vector with one pick get
+  cosine similarity 1.0 to it, a genuine tie), not a normalization bug, by
+  checking genre overlap directly: every 0.500-tier result shares the identical
+  Comedy+Drama+Romance genre set with "#Pellichoopulu". No exceptions in any
+  state (zero picks, 1 pick, 3 picks, single-view, compare-mode).
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

@@ -22,8 +22,10 @@ from src.models import (
     HybridRecommender,
     PopularityRecommender,
     SVDRecommender,
+    _primary_language,
     genre_profile_from_movie_ids,
     movie_ids_matching_languages,
+    recommend_similar_to_picks,
 )
 
 GENRES = ["Action", "Comedy", "Drama"]
@@ -140,6 +142,24 @@ class TestSVDRecommender:
         model_b.fit(train_df)
 
         assert model_a.predict("1", "3") == pytest.approx(model_b.predict("1", "3"))
+
+    def test_similar_items_excludes_the_movie_itself(self, train_df):
+        model = SVDRecommender(n_factors=4, n_epochs=5, random_state=42)
+        model.fit(train_df)
+
+        recs = model.similar_items("1", n=10)
+        assert recs
+        assert all(r.movie_id != "1" for r in recs)
+        assert all(r.source == "svd" for r in recs)
+
+    def test_similar_items_returns_empty_for_a_movie_with_no_training_ratings(self, train_df):
+        model = SVDRecommender(n_factors=4, n_epochs=5, random_state=42)
+        model.fit(train_df)
+
+        # "unknown_movie" never appears in train_df, so SVD never learned a factor
+        # vector for it -- no collaborative signal exists, and this must say so
+        # honestly (empty list) rather than guessing.
+        assert model.similar_items("unknown_movie", n=10) == []
 
 
 class TestPopularityRecommender:
@@ -347,16 +367,42 @@ class TestGenreProfileFromMovieIds:
         assert recs[0].source == "cold_start"
 
 
+class TestPrimaryLanguage:
+    def test_single_language_returns_it(self):
+        assert _primary_language("Telugu") == "Telugu"
+
+    def test_multi_language_returns_the_first_one(self):
+        # This is the exact real-world shape that motivated matching on primary
+        # language at all: "Dil Se.." is a Hindi film, Hindi listed first.
+        assert _primary_language("Hindi, Urdu, Assamese, Tamil, Telugu") == "Hindi"
+
+    def test_strips_whitespace(self):
+        assert _primary_language(" Telugu , Tamil") == "Telugu"
+
+    def test_empty_string_returns_none(self):
+        assert _primary_language("") is None
+
+    def test_non_string_returns_none(self):
+        assert _primary_language(None) is None
+        assert _primary_language(float("nan")) is None
+
+
 class TestMovieIdsMatchingLanguages:
-    def test_single_pick_matches_movies_sharing_that_language(self, movies_df):
-        # 1: Telugu -> shares "Telugu" with 2 (Telugu, Hindi); 3/4/5 don't have Telugu.
+    def test_single_pick_matches_movies_sharing_that_primary_language(self, movies_df):
+        # 1: Telugu (primary) -> 2's primary is also Telugu ("Telugu, Hindi" -> Telugu first).
         matches = movie_ids_matching_languages(["1"], movies_df)
         assert matches == {"1", "2"}
 
-    def test_multi_language_pick_matches_on_any_shared_language(self, movies_df):
-        # 3: Hindi -> shares "Hindi" with 2 (Telugu, Hindi) and 5 (Hindi).
-        matches = movie_ids_matching_languages(["3"], movies_df)
-        assert matches == {"2", "3", "5"}
+    def test_does_not_match_on_a_non_primary_language_tag(self, movies_df):
+        # Regression test for the real bug this caught in production: "Dil Se.." (a Hindi
+        # film dubbed into Telugu among others) was slipping into Telugu-picked results
+        # because it shared *a* language tag, even though Telugu wasn't its primary one.
+        # Movie 2 here is built the same way: primary language Telugu, with Hindi as a
+        # secondary tag ("Telugu, Hindi"). Picking movie 3 (Hindi) must NOT match it,
+        # even though movie 2's tags do technically include "Hindi".
+        matches = movie_ids_matching_languages(["3"], movies_df)  # 3: Hindi (primary)
+        assert matches == {"3", "5"}
+        assert "2" not in matches  # movie 2's primary language is Telugu, not Hindi
 
     def test_empty_picks_returns_none(self, movies_df):
         assert movie_ids_matching_languages([], movies_df) is None
@@ -386,9 +432,10 @@ class TestRecommendForGenreProfileCandidateRestriction:
         unrestricted = model.recommend_for_genre_profile(genre_weights=action_profile, n=5, exclude_seen=False)
         assert any(r.movie_id == "1" for r in unrestricted)
 
-        # Restricting to Hindi-only candidates (2, 3, 5) must exclude movie 1 (Telugu)
-        # entirely, even though it would otherwise be a strong Action match.
-        hindi_candidates = movie_ids_matching_languages(["3"], movies_df)  # {"2", "3", "5"}
+        # Restricting to Hindi-primary candidates (3, 5 -- movie 2's primary language is
+        # Telugu, not Hindi) must exclude movie 1 (Telugu) entirely, even though it would
+        # otherwise be a strong Action match.
+        hindi_candidates = movie_ids_matching_languages(["3"], movies_df)  # {"3", "5"}
         restricted = model.recommend_for_genre_profile(
             genre_weights=action_profile, n=5, exclude_seen=False, candidate_movie_ids=hindi_candidates
         )
@@ -402,3 +449,55 @@ class TestRecommendForGenreProfileCandidateRestriction:
 
         recs = model.recommend_for_genre_profile(genre_weights=None, n=5, candidate_movie_ids=set())
         assert recs == []
+
+
+class TestRecommendSimilarToPicks:
+    """Covers the live cold-start onboarding "similar to your picks" path: real
+    content + collaborative nearest-neighbor similarity to each individual pick,
+    not just overall popularity blended with one aggregated genre guess.
+    """
+
+    def _fitted_models(self, movies_df, train_df):
+        content = ContentBasedRecommender(genre_columns=GENRES)
+        svd = SVDRecommender(n_factors=4, n_epochs=5, random_state=42)
+        popularity = PopularityRecommender()
+        content.fit(train_df, movies_df)
+        svd.fit(train_df, movies_df)
+        popularity.fit(train_df, movies_df)
+        return content, svd, popularity
+
+    def test_excludes_the_users_own_pick(self, movies_df, train_df):
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        recs = recommend_similar_to_picks(["1"], content, svd, popularity, movies_df, n=3)
+        assert recs
+        assert all(r.movie_id != "1" for r in recs)
+
+    def test_excludes_all_picks_even_when_one_pick_is_a_neighbor_of_another(self, movies_df, train_df):
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        # movie 1 (Action) and movie 2 (Action+Comedy) are genre-similar to each
+        # other -- picking both must never recommend either back.
+        recs = recommend_similar_to_picks(["1", "2"], content, svd, popularity, movies_df, n=5)
+        assert recs
+        assert all(r.movie_id not in {"1", "2"} for r in recs)
+
+    def test_surfaces_a_genuine_genre_neighbor_not_just_popularity_order(self, movies_df, train_df):
+        # movie 1 (pure Action) shares genre with movie 2 (Action+Comedy) and movie 5
+        # (Action+Drama) -- a real content-similarity result, not the popularity
+        # ranking, should surface at least one of them tagged as such.
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        recs = recommend_similar_to_picks(["1"], content, svd, popularity, movies_df, n=5)
+        assert {r.movie_id for r in recs} & {"2", "5"}
+        assert any(r.source == "hybrid" for r in recs)
+
+    def test_backfills_with_popularity_when_pick_has_no_similarity_signal(self, movies_df, train_df):
+        # A pick that doesn't exist in the catalog at all has neither content nor
+        # collaborative neighbors -- results must still come back via the popularity
+        # backfill rather than an empty list.
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        recs = recommend_similar_to_picks(["unknown-pick"], content, svd, popularity, movies_df, n=3)
+        assert recs
+        assert all(r.source == "cold_start" for r in recs)

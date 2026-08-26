@@ -35,8 +35,7 @@ from src.models import (
     PopularityRecommender,
     Recommendation,
     SVDRecommender,
-    genre_profile_from_movie_ids,
-    movie_ids_matching_languages,
+    recommend_similar_to_picks,
 )
 from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
@@ -370,6 +369,8 @@ def render_recommendations(
 
 
 def recommend_for_new_user(
+    content_model: ContentBasedRecommender,
+    svd_model: SVDRecommender,
     popularity_model: PopularityRecommender,
     movies_df: pd.DataFrame,
     picked_movie_ids: list[str],
@@ -377,26 +378,16 @@ def recommend_for_new_user(
 ) -> list[Recommendation]:
     """Recommend movies for a brand-new user based on movies they just said they like.
 
-    This is the live counterpart to ``ColdStartRecommender``'s training-data-driven
-    fallback: instead of a real rating history, it turns the user's on-the-spot
-    picks into a genre-preference vector (:func:`genre_profile_from_movie_ids`) and
-    blends that with overall popularity via the same
-    ``PopularityRecommender.recommend_for_genre_profile`` the wrapper uses
-    internally. With no picks yet, this is identical to pure trending popularity.
-
-    Genre affinity alone is language-blind (see
-    :func:`movie_ids_matching_languages`), so picks are also used to narrow the
-    ranked pool to movies sharing at least one language with them -- otherwise a
-    handful of blockbuster hits in the catalog's dominant language can dominate
-    every profile regardless of what the user actually picked, since a broad
-    genre match plus much higher raw popularity outranks a smaller-language film
-    that's a better match. Falls back to the unrestricted catalog if the picks
-    have no parsed language info at all.
+    With no picks yet, this is pure trending popularity -- there's nothing to
+    be "similar to". Once there are picks, this is real similarity, not a
+    single blended genre guess: see :func:`recommend_similar_to_picks` for the
+    content + collaborative + language-aware logic.
 
     Args:
+        content_model: A fitted ``ContentBasedRecommender``.
+        svd_model: A fitted ``SVDRecommender``.
         popularity_model: A fitted ``PopularityRecommender``.
-        movies_df: Movie metadata, used to build the genre/language profile
-            from picks.
+        movies_df: Movie metadata.
         picked_movie_ids: IDs of movies the user picked as "movies I like".
         n: Number of recommendations to return.
 
@@ -404,19 +395,9 @@ def recommend_for_new_user(
         Up to ``n`` :class:`Recommendation` objects, none of them one of the
         user's own picks.
     """
-    genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
-    language_candidates = movie_ids_matching_languages(picked_movie_ids, movies_df)
-    # Fetch slack beyond n: a movie the user just picked as "liked" is exactly the
-    # kind of item this ranking tends to surface, so it's likely to appear in the
-    # raw results and needs to be filtered back out below.
-    raw_recs = popularity_model.recommend_for_genre_profile(
-        genre_weights=genre_profile,
-        n=n + len(picked_movie_ids),
-        exclude_seen=False,
-        candidate_movie_ids=language_candidates,
-    )
-    picked = set(picked_movie_ids)
-    return [r for r in raw_recs if r.movie_id not in picked][:n]
+    if not picked_movie_ids:
+        return popularity_model.recommend_for_genre_profile(genre_weights=None, n=n, exclude_seen=False)
+    return recommend_similar_to_picks(picked_movie_ids, content_model, svd_model, popularity_model, movies_df, n=n)
 
 
 st.markdown(CINEMA_CSS, unsafe_allow_html=True)
@@ -477,7 +458,10 @@ with st.sidebar:
             help="No rating history needed -- recommendations below update live from these picks.",
         )
         if picked_movie_ids:
-            st.caption(f"Personalizing from {len(picked_movie_ids)} pick(s) -- matched by genre and language.")
+            st.caption(
+                f"Personalizing from {len(picked_movie_ids)} pick(s) -- matched by genre similarity, "
+                "collaborative rating patterns, and language."
+            )
         else:
             st.caption("No picks yet -- showing overall trending movies until you pick a few.")
     else:
@@ -505,16 +489,27 @@ if compare_mode:
             "The raw Content-Based, SVD, and Hybrid models have no ratings to work with for a brand-new "
             "user and return nothing -- that gap is exactly what the cold-start wrapper (right) exists to fill."
         )
+    # The 4th panel is normally the plain popularity baseline, but once the user has
+    # live picks it's actually showing the content+collaborative similarity blend
+    # (see recommend_for_new_user) -- relabeled so the header stays honest about
+    # what's actually being ranked, rather than still calling it "Popularity Baseline".
+    fourth_panel_label = (
+        "Similar To Your Picks \U0001f3af"
+        if (simulate_cold and picked_movie_ids)
+        else "Popularity Baseline \U0001f4ca"
+    )
     panel_order = [
         ("content", "Content-Based \U0001f3ad"),
         ("svd", "SVD (Collaborative) \U0001f91d"),
         ("hybrid", "Hybrid \U0001f500"),
-        ("popularity", "Popularity Baseline \U0001f4ca"),
+        ("popularity", fourth_panel_label),
     ]
     panel_recs = {}
     for key, _ in panel_order:
         if simulate_cold and key == "popularity":
-            panel_recs[key] = recommend_for_new_user(models["popularity"], movies_df, picked_movie_ids, n_recs)
+            panel_recs[key] = recommend_for_new_user(
+                models["content"], models["svd"], models["popularity"], movies_df, picked_movie_ids, n_recs
+            )
         else:
             panel_recs[key] = models[key].recommend_for_user(selected_user_id, n=n_recs)
     needed_movie_ids = {rec.movie_id for recs in panel_recs.values() for rec in recs}
@@ -534,7 +529,9 @@ if compare_mode:
 else:
     st.subheader(f"Top {n_recs} recommendations for {user_label}")
     if simulate_cold:
-        recs = recommend_for_new_user(models["popularity"], movies_df, picked_movie_ids, n_recs)
+        recs = recommend_for_new_user(
+            models["content"], models["svd"], models["popularity"], movies_df, picked_movie_ids, n_recs
+        )
     else:
         recs = models["cold_start"].recommend_for_user(selected_user_id, n=n_recs)
     needed_movie_ids = {rec.movie_id for rec in recs}

@@ -150,19 +150,34 @@ absent from training data) — it's the only way to see this path trigger agains
 model state instead of just trusting the unit tests.
 
 That toggle also powers **live cold-start onboarding**: pick a few real movies you
-like from the catalog, and the app turns those picks into a genre-preference vector
-(`genre_profile_from_movie_ids`) and re-ranks recommendations from it in real time —
-no rating history required, no model retraining, no changes to the recommender
-architecture at all. `PopularityRecommender.recommend_for_genre_profile` already
-blended popularity with genre affinity for the training-data cold-start path; this
-just feeds it live picks instead.
+like from the catalog, and the app finds movies actually similar to *each* pick — no
+rating history required, no model retraining, no changes to the recommender
+architecture at all.
 
-Genre affinity alone turned out not to be enough: picking three Telugu movies
-originally returned an all-Hindi list, because this dataset's genres carry no
-language information and Hindi blockbusters simply have far more ratings than most
-regional titles. `movie_ids_matching_languages` narrows the ranked candidate pool to
-movies sharing a language with the picks *before* popularity and genre affinity are
-even applied — a second, orthogonal signal rather than a bigger genre weight.
+The first version of this (`genre_profile_from_movie_ids`) blended all picks into one
+aggregated genre-preference vector and re-ranked by popularity within it. Two rounds
+of "wait, are these recommendations actually correct?" — from the user, not assumed —
+found this wasn't enough:
+
+1. **Language-blind ranking.** Picking three Telugu movies returned an all-Hindi list,
+   because genre alone carries no language signal and Hindi blockbusters simply have
+   far more ratings than most regional titles. `movie_ids_matching_languages` fixed
+   this by restricting the candidate pool to movies sharing a language with the picks
+   — but matching on *any* shared language tag let a Hindi film dubbed into Telugu
+   slip into "Telugu" results. Fixed again by matching on each movie's *primary*
+   (first-listed) language only, via `_primary_language`.
+2. **Popularity was never actually "similar."** Even language-correct, this was still
+   "popularity within a filtered pool," not a check that any recommended movie
+   resembled any picked movie — and it never used collaborative signal at all, despite
+   SVD already being fit. `recommend_similar_to_picks` replaces it: for each individual
+   pick, it pulls real nearest neighbors from both `ContentBasedRecommender
+   .similar_items` (genre cosine similarity) and a new `SVDRecommender.similar_items`
+   (item-factor cosine similarity — genuine "other users who rated similar movies
+   similarly" signal), takes the best score per candidate across all picks, and blends
+   the two signals with the same normalize-then-weight pattern `HybridRecommender`
+   already uses for users, just applied per item. Language-restricted popularity is
+   still there, now purely as a backfill for picks with too little real neighbor
+   signal (e.g. an obscure or catalog-unknown pick) rather than the primary ranking.
 
 ### Why the hybrid doesn't win here (and why that's still a real result)
 
