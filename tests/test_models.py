@@ -105,6 +105,25 @@ class TestContentBasedRecommender:
         recs = model.recommend_for_user("1", n=10, exclude_seen=False)
         assert {r.movie_id for r in recs} == {"1", "2", "3", "4", "5"}
 
+    def test_similar_items_candidate_restriction_excludes_other_language_neighbors(self, movies_df, train_df):
+        model = ContentBasedRecommender(genre_columns=GENRES)
+        model.fit(train_df, movies_df)
+
+        # Unrestricted: movie 1 (Telugu, Action=[1,0,0]) ties in genre cosine
+        # similarity with movie 2 (Telugu, Action+Comedy=[1,1,0]) and movie 5
+        # (Hindi, Action+Drama=[1,0,1]) -- both are equally "similar" by genre alone.
+        unrestricted = model.similar_items("1", n=10)
+        assert {"2", "5"} <= {r.movie_id for r in unrestricted}
+
+        # Restricting to Telugu-primary candidates must drop movie 5 (Hindi) even
+        # though it's an exact genre-similarity tie with movie 2 (Telugu) -- genre
+        # alone can't tell them apart, language restriction is what does.
+        telugu_candidates = movie_ids_matching_languages(["1"], movies_df)  # {"1", "2"}
+        restricted = model.similar_items("1", n=10, candidate_movie_ids=telugu_candidates)
+        assert restricted
+        assert all(r.movie_id in telugu_candidates for r in restricted)
+        assert "5" not in {r.movie_id for r in restricted}
+
 
 class TestSVDRecommender:
     def test_predict_is_within_rating_bounds(self, train_df):
@@ -160,6 +179,14 @@ class TestSVDRecommender:
         # vector for it -- no collaborative signal exists, and this must say so
         # honestly (empty list) rather than guessing.
         assert model.similar_items("unknown_movie", n=10) == []
+
+    def test_similar_items_candidate_restriction_limits_results_to_the_given_set(self, train_df):
+        model = SVDRecommender(n_factors=4, n_epochs=5, random_state=42)
+        model.fit(train_df)
+
+        restricted = model.similar_items("1", n=10, candidate_movie_ids={"2", "3"})
+        assert restricted
+        assert all(r.movie_id in {"2", "3"} for r in restricted)
 
 
 class TestPopularityRecommender:
@@ -500,4 +527,33 @@ class TestRecommendSimilarToPicks:
 
         recs = recommend_similar_to_picks(["unknown-pick"], content, svd, popularity, movies_df, n=3)
         assert recs
+        assert all(r.source == "cold_start" for r in recs)
+
+    def test_language_restricts_the_primary_similarity_path_not_just_backfill(self, movies_df, train_df):
+        # Movie 5 (Hindi, Action+Drama) ties movie 2 (Telugu, Action+Comedy) in raw
+        # genre-cosine similarity with pick 1 (Telugu, Action) -- genre alone can't
+        # tell them apart. Restricting the primary content/SVD search to
+        # Telugu-primary candidates must keep movie 5 out of the real "hybrid"
+        # similarity results entirely (it may still surface later as an
+        # honestly-labeled popularity backfill/safety-net result once real
+        # same-language candidates run out -- that's fine; being ranked as if it
+        # were a genuine similarity match is the bug).
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        recs = recommend_similar_to_picks(["1"], content, svd, popularity, movies_df, n=5)
+        hybrid_ids = {r.movie_id for r in recs if r.source == "hybrid"}
+        assert hybrid_ids == {"2"}
+
+    def test_rare_language_pick_still_returns_n_results_via_unrestricted_safety_net(self, movies_df, train_df):
+        # Movie 4's primary language (Tamil) matches no other catalog movie, so
+        # both the language-restricted primary search and the language-restricted
+        # backfill come up completely empty for this pick. The result must still
+        # come back with a full n recommendations via one final *unrestricted*
+        # popularity pass, rather than under-deliver just because the pick's
+        # language happens to be rare in the catalog.
+        content, svd, popularity = self._fitted_models(movies_df, train_df)
+
+        recs = recommend_similar_to_picks(["4"], content, svd, popularity, movies_df, n=4)
+        assert len(recs) == 4
+        assert {r.movie_id for r in recs} == {"1", "2", "3", "5"}
         assert all(r.source == "cold_start" for r in recs)

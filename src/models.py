@@ -180,7 +180,9 @@ class ContentBasedRecommender(BaseRecommender):
                 break
         return results
 
-    def similar_items(self, movie_id: str, n: int = 10) -> list[Recommendation]:
+    def similar_items(
+        self, movie_id: str, n: int = 10, candidate_movie_ids: set[str] | None = None
+    ) -> list[Recommendation]:
         """Return the ``n`` movies most similar to ``movie_id`` by genre.
 
         Bonus "more like this" lookup, independent of any user -- handy
@@ -189,6 +191,14 @@ class ContentBasedRecommender(BaseRecommender):
         Args:
             movie_id: Raw movie ID to find neighbors for.
             n: Number of similar movies to return.
+            candidate_movie_ids: If given, only movies in this set are
+                eligible to be returned as neighbors -- e.g. restricting to
+                the query movie's primary language (see
+                :func:`movie_ids_matching_languages`), since genre alone
+                carries no language information and can otherwise tie a
+                same-genre movie in a completely different language with
+                one that's actually a close match. ``None`` considers the
+                full catalog.
 
         Returns:
             Up to ``n`` :class:`Recommendation` objects, most similar first.
@@ -202,7 +212,10 @@ class ContentBasedRecommender(BaseRecommender):
         for i in ranked_idx:
             if i == idx:
                 continue
-            results.append(Recommendation(movie_id=str(self._movie_ids[i]), score=float(sims[i]), source="content"))
+            mid = str(self._movie_ids[i])
+            if candidate_movie_ids is not None and mid not in candidate_movie_ids:
+                continue
+            results.append(Recommendation(movie_id=mid, score=float(sims[i]), source="content"))
             if len(results) >= n:
                 break
         return results
@@ -331,7 +344,9 @@ class SVDRecommender(BaseRecommender):
                 break
         return results
 
-    def similar_items(self, movie_id: str, n: int = 10) -> list[Recommendation]:
+    def similar_items(
+        self, movie_id: str, n: int = 10, candidate_movie_ids: set[str] | None = None
+    ) -> list[Recommendation]:
         """Return the ``n`` movies most similar to ``movie_id`` by learned collaborative factors.
 
         The collaborative counterpart to
@@ -354,6 +369,12 @@ class SVDRecommender(BaseRecommender):
         Args:
             movie_id: Raw movie ID to find neighbors for.
             n: Number of similar movies to return.
+            candidate_movie_ids: If given, only movies in this set are
+                eligible to be returned as neighbors -- e.g. restricting to
+                the query movie's primary language (see
+                :func:`movie_ids_matching_languages`), since the learned
+                rating-pattern similarity this method surfaces has no notion
+                of language either. ``None`` considers the full catalog.
 
         Returns:
             Up to ``n`` :class:`Recommendation` objects (``source="svd"``),
@@ -373,7 +394,10 @@ class SVDRecommender(BaseRecommender):
         for i in ranked_idx:
             if i == idx:
                 continue
-            results.append(Recommendation(movie_id=str(self._item_ids[i]), score=float(sims[i]), source="svd"))
+            mid = str(self._item_ids[i])
+            if candidate_movie_ids is not None and mid not in candidate_movie_ids:
+                continue
+            results.append(Recommendation(movie_id=mid, score=float(sims[i]), source="svd"))
             if len(results) >= n:
                 break
         return results
@@ -767,18 +791,30 @@ def recommend_similar_to_picks(
       legitimately contributes content signal only, rather than a fabricated
       collaborative one).
 
-    A candidate's content/collaborative score is its *best* (max) similarity
-    to any single pick, not a score against one blended profile -- scoring
-    each pick individually is what actually answers "is this similar to
-    something they picked"; averaging into one profile first can wash out a
-    strong match to just one distinctive pick among several. The two signals
-    are min-max normalized and blended by ``alpha``, the same
-    normalize-then-blend approach :class:`HybridRecommender` already uses for
-    content vs. SVD at the user level -- this is that same idea applied at
-    the item level. Movies neither signal ever surfaces (rare, but possible
-    for very niche picks) are backfilled with language-restricted popularity
-    so the result doesn't fall short of ``n`` just because the neighbor
-    search came up thin.
+    Both neighbor searches are restricted to the picks' primary language (see
+    :func:`movie_ids_matching_languages`) *before* ranking, not filtered
+    afterward -- neither genre nor the learned collaborative factors carry
+    any language information on their own, so an unrestricted search can
+    easily tie or outrank a real same-language match with an unrelated film
+    in a different language entirely (confirmed live: two Telugu picks
+    surfacing Bengali/Hindi/Kannada/English results with no same-language
+    result even in the top spot). A candidate's content/collaborative score
+    is its *best* (max) similarity to any single pick, not a score against
+    one blended profile -- scoring each pick individually is what actually
+    answers "is this similar to something they picked"; averaging into one
+    profile first can wash out a strong match to just one distinctive pick
+    among several. The two signals are min-max normalized and blended by
+    ``alpha``, the same normalize-then-blend approach
+    :class:`HybridRecommender` already uses for content vs. SVD at the user
+    level -- this is that same idea applied at the item level. Movies neither
+    signal ever surfaces (rare, but possible for very niche picks) are
+    backfilled with language-restricted popularity so the result doesn't fall
+    short of ``n`` just because the neighbor search came up thin; if even
+    that restricted backfill can't reach ``n`` (a pick in a language with only
+    a handful of catalog movies), one final *unrestricted* popularity pass
+    fills any remaining slots -- language narrows the search, but, per
+    :func:`movie_ids_matching_languages`'s own contract, never causes fewer
+    than ``n`` results to come back.
 
     Args:
         picked_movie_ids: IDs of movies the user picked as "movies I like".
@@ -803,15 +839,21 @@ def recommend_similar_to_picks(
         user's own picks.
     """
     picked = set(picked_movie_ids)
+    # Computed once, up front, and reused for both the primary neighbor search
+    # (below) and the backfill (further down) -- None means "no parsed
+    # language info at all for any pick", the same "can't narrow, don't
+    # filter" contract movie_ids_matching_languages documents.
+    language_candidates = movie_ids_matching_languages(picked_movie_ids, movies_df)
+
     content_scores: dict[str, float] = {}
     collab_scores: dict[str, float] = {}
 
     for pick in picked_movie_ids:
-        for rec in content_model.similar_items(pick, n=neighbors_per_pick):
+        for rec in content_model.similar_items(pick, n=neighbors_per_pick, candidate_movie_ids=language_candidates):
             if rec.movie_id in picked:
                 continue
             content_scores[rec.movie_id] = max(content_scores.get(rec.movie_id, -1.0), rec.score)
-        for rec in svd_model.similar_items(pick, n=neighbors_per_pick):
+        for rec in svd_model.similar_items(pick, n=neighbors_per_pick, candidate_movie_ids=language_candidates):
             if rec.movie_id in picked:
                 continue
             collab_scores[rec.movie_id] = max(collab_scores.get(rec.movie_id, -1.0), rec.score)
@@ -828,10 +870,10 @@ def recommend_similar_to_picks(
         ranked = sorted(blended.items(), key=lambda kv: -kv[1])
         results = [Recommendation(movie_id=mid, score=score, source="hybrid") for mid, score in ranked]
 
+    genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
+
     if len(results) < n:
         already = picked | {r.movie_id for r in results}
-        language_candidates = movie_ids_matching_languages(picked_movie_ids, movies_df)
-        genre_profile = genre_profile_from_movie_ids(picked_movie_ids, movies_df)
         backfill = popularity_model.recommend_for_genre_profile(
             genre_weights=genre_profile,
             n=(n - len(results)) + len(already),
@@ -839,6 +881,24 @@ def recommend_similar_to_picks(
             candidate_movie_ids=language_candidates,
         )
         for rec in backfill:
+            if rec.movie_id in already:
+                continue
+            results.append(rec)
+            already.add(rec.movie_id)
+            if len(results) >= n:
+                break
+
+    if len(results) < n:
+        # Even the language-restricted backfill came up short -- true only for a
+        # pick in a language with a handful of catalog movies. Rather than
+        # under-deliver, one final unrestricted popularity pass fills the rest:
+        # language narrows the search, it never reduces how many results come
+        # back.
+        already = picked | {r.movie_id for r in results}
+        more = popularity_model.recommend_for_genre_profile(
+            genre_weights=genre_profile, n=(n - len(results)) + len(already), exclude_seen=False
+        )
+        for rec in more:
             if rec.movie_id in already:
                 continue
             results.append(rec)

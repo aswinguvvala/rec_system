@@ -637,6 +637,60 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   105 passed, unaffected (`app.py` has never been unit-imported by the test suite; it's
   verified live, per convention).
 
+## Live cold-start onboarding, round 3: language leak in the similarity path (Phase 11)
+- User feedback, live on the deployed app after Phase 10's redesign: picked two Telugu
+  films ("Chal Mohana Ranga", "Eega") and asked directly "do you think these
+  recommendations are correct?" -- the top 10 spanned Bengali, Hindi, Tamil, Kannada,
+  and English titles, with the single best real Telugu match ("Manam") not even ranked
+  first.
+- Diagnosed against the real fitted models before touching code (loaded the actual
+  cached dataset, fit `ContentBasedRecommender`/`SVDRecommender`/`PopularityRecommender`,
+  and called `similar_items`/`recommend_similar_to_picks` directly with the user's exact
+  picks) rather than guessing from the UI output alone. Root cause, confirmed with real
+  numbers: **the Phase 9 language fix (`movie_ids_matching_languages`) was only ever
+  wired into `recommend_similar_to_picks`'s *backfill* branch, never its primary
+  content+SVD neighbor search.** Since that primary search found >= n candidates on its
+  own here, backfill never ran, so language was never applied at all. Two structural
+  weaknesses made this concretely visible: "Chal Mohana Ranga" has a single generic
+  genre tag (`Drama` only, shared by hundreds of movies in every language) and zero
+  training ratings, so its only real signal was a near-meaningless genre tie across
+  dozens of languages; "Eega"'s more specific genre combo (Comedy+Drama+Fantasy)
+  correctly tied at cosine similarity 1.0 with both the real Telugu match ("Manam") and
+  an unrelated Hindi film ("Mirch") -- genre vectors simply carry no language
+  information, so nothing broke the tie in favor of the same-language result.
+- Fixed at the source, not with a post-hoc filter: `ContentBasedRecommender.similar_items`
+  and `SVDRecommender.similar_items` both gained an optional `candidate_movie_ids`
+  parameter (mirroring `PopularityRecommender.recommend_for_genre_profile`'s existing
+  one) that restricts the ranked pool *before* computing the top-n neighbors, not after
+  -- filtering top-50-then-narrowing risked losing real same-language matches that
+  simply weren't lucky enough to land in an unrestricted top 50 among a huge tied set.
+  `recommend_similar_to_picks` now computes `movie_ids_matching_languages` once up front
+  and passes it into both neighbor searches, so the primary "hybrid" similarity results
+  are language-restricted exactly like the backfill already was, not just the backfill.
+- Added one more safety net beyond what Phase 9 had: if language-restricted primary
+  search *and* language-restricted backfill still can't reach `n` (realistic for a pick
+  in a rare regional language with only a handful of catalog titles), a final
+  *unrestricted* popularity pass fills the remainder -- language narrows the search but,
+  matching `movie_ids_matching_languages`'s own "never recommend nothing" contract, never
+  causes fewer than `n` results to come back; any such backfilled title is still honestly
+  labeled `source="cold_start"`, not `"hybrid"`, so it's never confused with a genuine
+  similarity match.
+- 4 new tests: `similar_items` candidate-restriction tests for both
+  `ContentBasedRecommender` (proves a language-restricted search drops an exact-tie
+  cross-language neighbor that an unrestricted search would keep) and `SVDRecommender`;
+  an end-to-end `recommend_similar_to_picks` test proving the primary `source="hybrid"`
+  results are language-restricted, not just backfill; and a rare-language safety-net test
+  proving a pick whose primary language matches nothing else in the catalog still returns
+  a full `n` results via the final unrestricted pass. 109 tests total, all green.
+- Re-verified against the user's *exact* two picks, both via the standalone diagnostic
+  script against the real fitted models and live in the browser (driving the actual
+  running app): all 10 results are now genuinely Telugu-primary and sourced from real
+  content/SVD similarity (`source="hybrid"`), not a popularity fallback -- e.g.
+  Balanagamma, Neramu Siksha, Aa Naluguru, Devatha, Daasi, Swayam Krushi, Sardar
+  Dharmanna, Subhodayam, Appu Chesi Pappu Koodu, Malapilla. Confirmed the standalone
+  script's output matched the live UI's output exactly, movie-for-movie and in the same
+  order.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
