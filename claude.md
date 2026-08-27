@@ -576,6 +576,67 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   Comedy+Drama+Romance genre set with "#Pellichoopulu". No exceptions in any
   state (zero picks, 1 pick, 3 picks, single-view, compare-mode).
 
+## UI redesign, round 2: streaming-service theme (Phase 10)
+- User feedback, verbatim: "I did not like the ui at all. I need a netflix styled ui the
+  wording are too much neat clean theme and the side bar is also annoying make it modern."
+  Three concrete complaints, addressed directly rather than a cosmetic color swap:
+  too much wording on every card, an annoying sidebar, and a request for a Netflix-like
+  dark/poster-forward look.
+- **Sidebar removed entirely**, not just restyled -- `st.sidebar` is gone from `app.py`
+  (`initial_sidebar_state="collapsed"` plus `[data-testid="stSidebar"] { display: none; }`
+  as a defensive belt-and-braces). All controls (new-user toggle, user/picks selector,
+  results slider, compare toggle) moved into one horizontal toolbar (`st.columns` right
+  under the hero) styled as a single dark card via `[data-testid="stHorizontalBlock"]`
+  -- the only remaining use of `st.columns` in the app, so that selector is safe to
+  target globally without collateral styling elsewhere.
+- **Card chrome cut down deliberately** ("too much wording"): the old card had a bordered
+  pill badge with an emoji + full model name + a permanent mono "score 0.842" line under
+  every poster. Replaced with: a small unlabeled rank dot, a small colored dot per source
+  (title-attribute tooltip only, no visible text), and the model label + score moved into
+  a gradient hover overlay on the poster (`.hover-meta`, opacity 0 -> 1 on
+  `.movie-card:hover`) -- visible on demand, not cluttering the default view or a static
+  screenshot's poster grid.
+- **Netflix-style horizontal shelves added for compare mode**, replacing the old 4-column
+  `st.columns` layout of vertical compact-list cards: each model (Content-Based, SVD,
+  Hybrid, Popularity/Similar-to-picks) is now a labeled row (`render_shelf`) of the same
+  poster cards in a `overflow-x: auto` flex row with a thin styled scrollbar and scroll-snap
+  -- the single-model view still uses a wrapping grid (`render_grid`) since browsing all N
+  results at once suits a screenshot better than one long scrollable row. Both share the
+  same `_movie_card_html` card markup, unified rather than the old two near-duplicate card
+  renderers.
+- **Typography and palette simplified**, not just recolored: dropped Bebas Neue (display)
+  and IBM Plex Mono (labels/score) entirely -- one font family now, Inter (weights
+  400-900), which reads closer to Netflix Sans/Helvetica than the old condensed-display +
+  monospace combination did, and is itself a "less wording noise" win (fewer competing
+  type styles per card). Background/surface colors moved to Netflix's actual dark palette
+  (`#141414` bg, `#1f1f1f` elevated surface) and the primary accent to Netflix red
+  (`#e50914`), used for the navbar wordmark and native-widget focus states
+  (`.streamlit/config.toml`'s `primaryColor`) only -- reserved as a brand/CTA color, not
+  reused for a model badge. The four source colors were re-picked to avoid clashing with
+  that red: content `#2dd4bf` (teal), svd `#a78bfa` (violet), hybrid `#f5c518` (gold),
+  cold_start/similar-to-picks `#38bdf8` (sky blue, moved off its old reddish tone for
+  exactly this reason).
+- **Hero and copy shortened** throughout: the old hero had a separate mono "eyebrow" line,
+  a two-line Bebas Neue display title, and a technical tagline; now one short punchy title
+  ("Find your next favorite film.") plus a single-line tagline, a plain-text navbar wordmark
+  ("CineMatch") carrying the dataset/tech eyebrow instead of a dedicated hero line, and
+  every sidebar-era caption/help string cut to one short sentence or removed (e.g. the old
+  per-user age/gender/occupation caption was dropped as not central to the recommendation
+  story). The metrics table moved into a collapsed-by-default `st.expander` so it no longer
+  adds permanent scroll weight to the page.
+- Verified live in the browser (not just headlessly), driving the actual running app:
+  default single-user view renders the new poster grid with real posters and working hover
+  overlays (confirmed "3 Idiots" shows a gold "Hybrid · 0.95" overlay on hover); Compare
+  Models renders four real horizontal shelves with distinct per-model source-dot colors;
+  New User -> zero picks shows blue-dotted trending popularity with no sidebar anywhere;
+  typing "Sholay" into the live picker and selecting it re-ranked the grid in real time to
+  a completely different, unrelated-looking set with gold hybrid-similarity dots -- same
+  underlying `recommend_similar_to_picks` behavior as Phase 9, now just rendered through
+  the new card/grid components, confirming the redesign didn't regress the actual
+  recommendation logic, only its presentation. `pytest tests/ -v` re-run after the change:
+  105 passed, unaffected (`app.py` has never been unit-imported by the test suite; it's
+  verified live, per convention).
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

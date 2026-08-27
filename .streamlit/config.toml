@@ -1,13 +1,13 @@
-# Base dark cinema theme for the native Streamlit widgets (sidebar, selectbox,
-# slider, checkbox, dataframe, buttons). Bespoke elements -- the hero title,
-# movie cards, and background motif -- are layered on top via CSS injected
-# from app.py. Setting the theme here (the officially supported mechanism)
-# rather than fighting every widget's internal class name in CSS keeps native
-# widgets consistent across Streamlit versions.
+# Base dark "streaming service" theme for the native Streamlit widgets (toolbar
+# selects/sliders/checkboxes, dataframe, buttons). Bespoke elements -- the navbar,
+# hero, poster cards, and shelves -- are layered on top via CSS injected from
+# app.py. Setting the theme here (the officially supported mechanism) rather than
+# fighting every widget's internal class name in CSS keeps native widgets
+# consistent across Streamlit versions.
 [theme]
 base = "dark"
-primaryColor = "#e3b23c"
-backgroundColor = "#0a0908"
-secondaryBackgroundColor = "#16130f"
-textColor = "#f2ede4"
+primaryColor = "#e50914"
+backgroundColor = "#141414"
+secondaryBackgroundColor = "#1f1f1f"
+textColor = "#f5f5f1"
 font = "sans serif"

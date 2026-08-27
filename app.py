@@ -10,9 +10,13 @@ fast.
 
 Poster images are optional, best-effort enrichment from TMDb (see
 ``src/posters.py``) -- the app runs fine with no ``TMDB_API_KEY``
-configured, falling back to a placeholder poster per card. The dark
-"cinema" theme lives partly in ``.streamlit/config.toml`` (native widgets)
-and partly in the CSS injected below (hero, cards, background motif).
+configured, falling back to a placeholder poster per card. The UI is a
+dark, poster-forward "streaming service" theme (Phase 10): a slim top
+navbar, a single horizontal toolbar in place of the old sidebar, minimal
+per-card chrome (detail appears on hover), and Netflix-style horizontal
+shelves for the model-comparison view. Theme base colors live in
+``.streamlit/config.toml``; bespoke layout (navbar, hero, cards, shelves)
+is CSS injected below.
 
 Note: this is the one file in the project where ``print`` isn't banned,
 per ``claude.md`` -- but this app deliberately doesn't use it. Streamlit's
@@ -40,186 +44,151 @@ from src.models import (
 from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
 
-st.set_page_config(page_title="Hybrid Movie Recommender", page_icon="\U0001f3ac", layout="wide")
+st.set_page_config(
+    page_title="CineMatch",
+    page_icon="\U0001f3ac",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 # Sentinel guaranteed absent from this dataset's real (free-text, human-typed) user ids.
 COLD_START_USER_ID = "__simulated_new_user__"
 
-# label, emoji, accent color (used for both the CSS badge class and the compact dot).
+# label, emoji (used in shelf headers / tooltips only, not on every card), accent color.
 SOURCE_META: dict[str, tuple[str, str, str]] = {
-    "content": ("Content-Based", "\U0001f3ad", "#7ec3dd"),
-    "svd": ("SVD (Collaborative)", "\U0001f91d", "#b79bf0"),
-    "hybrid": ("Hybrid", "\U0001f500", "#e3b23c"),
-    "cold_start": ("Cold-Start Popularity", "\U0001f195", "#e2837c"),
+    "content": ("Content-Based", "\U0001f3ad", "#2dd4bf"),
+    "svd": ("SVD (Collaborative)", "\U0001f91d", "#a78bfa"),
+    "hybrid": ("Hybrid", "\U0001f500", "#f5c518"),
+    "cold_start": ("Popularity", "\U0001f4ca", "#38bdf8"),
 }
 
-CINEMA_CSS = """
+NETFLIX_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
 
 :root {
-    --bg: #0a0908;
-    --bg-card: rgba(255,255,255,0.035);
-    --bg-card-hover: rgba(255,255,255,0.06);
-    --border: rgba(255,255,255,0.09);
-    --text: #f2ede4;
-    --text-muted: #9c9186;
-    --accent-gold: #e3b23c;
-    --font-display: 'Bebas Neue', 'Arial Narrow', sans-serif;
-    --font-body: 'Inter', sans-serif;
-    --font-mono: 'IBM Plex Mono', monospace;
+    --bg: #141414;
+    --bg-elev: #1f1f1f;
+    --bg-card: #181818;
+    --border: rgba(255,255,255,0.08);
+    --text: #f5f5f1;
+    --text-muted: #a3a3a3;
+    --accent-red: #e50914;
+    --font: 'Inter', 'Helvetica Neue', Arial, sans-serif;
 }
 
-html, body, [class*="css"] { font-family: var(--font-body); }
+html, body, [class*="css"] { font-family: var(--font); }
 
-/* Procedural cinema background: warm spotlight glow behind the hero, a dark
-   vignette toward the edges, and a filmstrip perforation strip along the
-   very top and bottom of the viewport -- no external image, same technique
-   as a hand-drawn CSS starfield, just a film motif instead of a space one. */
-.stApp {
-    background:
-        radial-gradient(ellipse 900px 480px at 50% -8%, rgba(227,178,60,0.10), transparent 60%),
-        radial-gradient(ellipse 1100px 700px at 50% 105%, rgba(0,0,0,0.55), transparent 70%),
-        var(--bg);
-}
-.stApp::before, .stApp::after {
+.stApp { background: var(--bg); }
+.stApp::before {
     content: "";
-    position: fixed;
-    left: 0; right: 0;
-    height: 22px;
-    background-color: #050403;
-    background-image: repeating-radial-gradient(circle at 16px 11px, rgba(242,237,228,0.16) 0 3px, transparent 3px 32px);
-    z-index: 0;
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse 1100px 600px at 50% -10%, rgba(229,9,20,0.16), transparent 60%);
     pointer-events: none;
+    z-index: 0;
 }
-.stApp::before { top: 0; }
-.stApp::after { bottom: 0; }
 
-#MainMenu, footer { visibility: hidden; }
-[data-testid="stHeader"] { background: transparent; }
+#MainMenu, footer, [data-testid="stHeader"] { display: none; }
+[data-testid="stSidebar"] { display: none; } /* controls live in the top toolbar instead */
 
-[data-testid="stSidebar"] { background: #100e0b; border-right: 1px solid var(--border); }
-[data-testid="stSidebar"] h2 {
-    font-family: var(--font-mono);
-    text-transform: uppercase;
-    letter-spacing: .1em;
-    font-size: .8rem;
-    color: var(--accent-gold);
+.block-container { padding-top: 1.75rem; max-width: 1400px; }
+
+/* Navbar */
+.navbar {
+    display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
+    padding-bottom: 1rem; margin-bottom: .25rem;
     border-bottom: 1px solid var(--border);
-    padding-bottom: .6rem;
+    position: relative; z-index: 1;
 }
-
-.stApp h3 {
-    font-family: var(--font-display);
-    font-weight: 400;
-    letter-spacing: .02em;
-    font-size: 1.7rem;
-    color: var(--text);
+.navbar-brand {
+    font-weight: 900; font-size: 1.4rem; letter-spacing: .01em;
+    color: var(--accent-red); text-transform: uppercase;
 }
+.navbar-tag { font-size: .78rem; color: var(--text-muted); font-weight: 500; }
 
 /* Hero */
-.hero { padding: .5rem 0 1.25rem; position: relative; z-index: 1; }
-.hero-eyebrow {
-    font-family: var(--font-mono);
-    font-size: .72rem;
-    letter-spacing: .16em;
-    text-transform: uppercase;
-    color: var(--accent-gold);
-    margin-bottom: .5rem;
-}
+.hero { padding: 1.5rem 0 1.1rem; position: relative; z-index: 1; }
 .hero-title {
-    font-family: var(--font-display);
-    font-weight: 400;
-    font-size: 3.4rem;
-    line-height: 1.05;
-    letter-spacing: .01em;
-    color: var(--text);
-    margin: 0 0 .6rem;
+    font-weight: 800; font-size: 2.3rem; line-height: 1.15;
+    color: var(--text); margin: 0 0 .5rem; letter-spacing: -.01em;
 }
-.hero-tagline {
-    font-family: var(--font-body);
-    font-size: .95rem;
-    color: var(--text-muted);
-    max-width: 62ch;
-    line-height: 1.5;
+.hero-tagline { font-size: .92rem; color: var(--text-muted); max-width: 68ch; line-height: 1.5; }
+.key-hint { font-size: .78rem; color: var(--text-muted); margin: -.4rem 0 .5rem; }
+
+/* Toolbar -- replaces the old sidebar; one horizontal bar of native widgets */
+[data-testid="stHorizontalBlock"] {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.25rem .25rem;
+    margin-bottom: 1.75rem;
+    position: relative; z-index: 1;
 }
-.key-hint {
-    font-family: var(--font-mono);
-    font-size: .72rem;
-    color: var(--text-muted);
-    margin-top: .5rem;
+[data-testid="stHorizontalBlock"] label { font-size: .72rem !important; }
+
+.stApp h3 { font-weight: 700; font-size: 1.25rem; color: var(--text); letter-spacing: -.01em; }
+
+/* Shelves -- Netflix-style horizontal scroll rows, used in compare mode */
+.shelf { position: relative; z-index: 1; margin-bottom: 1.6rem; }
+.shelf-header { display: flex; align-items: center; gap: .5rem; margin-bottom: .6rem; }
+.shelf-title { font-weight: 700; font-size: 1.02rem; color: var(--text); }
+.shelf-row {
+    display: flex; gap: .8rem; overflow-x: auto; padding: .15rem .15rem 1rem;
+    scroll-snap-type: x proximity;
+}
+.shelf-row::-webkit-scrollbar { height: 6px; }
+.shelf-row::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+.shelf-row::-webkit-scrollbar-track { background: transparent; }
+.shelf-row .movie-card { flex: 0 0 140px; scroll-snap-align: start; }
+
+/* Grid, used in single-model view */
+.movie-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 1.1rem; margin-top: .25rem; position: relative; z-index: 1;
 }
 
-/* Movie cards */
-.movie-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-    gap: 1.1rem;
-    margin-top: 1rem;
-    position: relative;
-    z-index: 1;
+/* Movie card -- poster-forward, minimal chrome; detail surfaces on hover */
+.movie-card { position: relative; }
+.poster-wrap {
+    position: relative; width: 100%; aspect-ratio: 2 / 3; border-radius: 6px;
+    background: var(--bg-card); overflow: hidden;
+    transition: transform .2s ease, box-shadow .2s ease;
 }
-.movie-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-}
-.poster-wrap { position: relative; width: 100%; aspect-ratio: 2 / 3; background: #1c1812; overflow: hidden; }
+.movie-card:hover .poster-wrap { transform: scale(1.06); box-shadow: 0 16px 32px rgba(0,0,0,.6); z-index: 5; }
 .poster-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .poster-placeholder {
-    width: 100%; height: 100%;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .4rem;
-    background: linear-gradient(160deg, #221c14, #14110d);
-    color: rgba(242,237,228,0.32);
-    font-size: 2rem;
-    text-align: center;
-    padding: .75rem;
+    width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: .35rem; background: linear-gradient(160deg, #232323, #141414);
+    color: rgba(245,245,241,0.3); font-size: 1.8rem; text-align: center; padding: .6rem;
 }
-.poster-placeholder span {
-    font-family: var(--font-mono);
-    font-size: .62rem;
-    letter-spacing: .02em;
-    color: rgba(242,237,228,0.45);
-    line-height: 1.3;
-}
-.rank-badge {
-    position: absolute; top: 8px; left: 8px;
-    width: 24px; height: 24px; border-radius: 50%;
-    background: rgba(10,9,8,0.75);
-    border: 1px solid var(--accent-gold);
-    color: var(--accent-gold);
-    font-family: var(--font-mono);
-    font-size: .72rem;
+.poster-placeholder span { font-size: .6rem; color: rgba(245,245,241,0.45); line-height: 1.3; }
+
+.rank-dot {
+    position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; border-radius: 50%;
+    background: rgba(0,0,0,.65); color: #fff; font-size: .65rem; font-weight: 700;
     display: flex; align-items: center; justify-content: center;
 }
-.movie-card-body { padding: .65rem .75rem .8rem; display: flex; flex-direction: column; gap: .45rem; flex: 1; }
-.movie-title { font-size: .85rem; font-weight: 600; line-height: 1.25; color: var(--text); }
-.movie-meta { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
-.badge {
-    font-family: var(--font-mono);
-    font-size: .6rem;
-    letter-spacing: .02em;
-    padding: .2rem .5rem;
-    border-radius: 999px;
-    white-space: nowrap;
-    border: 1px solid;
+.source-dot {
+    position: absolute; top: 8px; right: 8px; width: 10px; height: 10px; border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(0,0,0,.5);
 }
-.score { font-family: var(--font-mono); font-size: .66rem; color: var(--text-muted); }
+.hover-meta {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 1.6rem .5rem .4rem;
+    background: linear-gradient(to top, rgba(0,0,0,.92) 25%, transparent 100%);
+    opacity: 0; transform: translateY(4px);
+    transition: opacity .18s ease, transform .18s ease;
+    display: flex; justify-content: space-between; align-items: baseline; gap: .3rem;
+}
+.movie-card:hover .hover-meta { opacity: 1; transform: translateY(0); }
+.hover-label { font-size: .62rem; font-weight: 700; }
+.hover-score { font-size: .62rem; color: var(--text-muted); }
 
-/* Compact horizontal card, used in the 4-column side-by-side view */
-.movie-list--compact { display: flex; flex-direction: column; gap: .55rem; margin-top: .75rem; position: relative; z-index: 1; }
-.movie-card--compact { flex-direction: row; align-items: stretch; }
-.movie-card--compact .poster-wrap { width: 50px; flex: 0 0 50px; aspect-ratio: auto; }
-.movie-card--compact .rank-badge { width: 18px; height: 18px; font-size: .6rem; top: 4px; left: 4px; }
-.movie-card--compact .movie-card-body { padding: .4rem .55rem; justify-content: center; gap: .25rem; }
-.movie-card--compact .movie-title { font-size: .72rem; }
-.movie-card--compact .badge { font-size: .55rem; padding: .12rem .4rem; }
-.movie-card--compact .score { font-size: .6rem; }
+.card-title {
+    font-size: .78rem; font-weight: 600; color: var(--text); margin-top: .45rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
-.empty-hint { font-family: var(--font-mono); font-size: .78rem; color: var(--text-muted); padding: .75rem 0; }
+.empty-hint { font-size: .82rem; color: var(--text-muted); padding: .5rem 0 1rem; }
 </style>
 """
 
@@ -317,9 +286,15 @@ def load_posters(movie_ids: tuple[str, ...], api_key: str | None) -> dict[str, s
     return get_poster_urls_by_imdb_id(movie_ids, api_key)
 
 
-def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str | None, *, compact: bool = False) -> str:
-    """Render one recommendation as a movie-card HTML snippet."""
-    label, emoji, color = SOURCE_META.get(rec.source, (rec.source, "•", "#9c9186"))
+def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str | None) -> str:
+    """Render one recommendation as a poster-forward movie-card HTML snippet.
+
+    Chrome is deliberately minimal: a rank dot and a colored source dot sit on
+    the poster itself, and the model label + score only surface in a hover
+    overlay -- keeping the default (and any static screenshot) clean while
+    still exposing which model produced each pick for anyone who hovers.
+    """
+    label, _emoji, color = SOURCE_META.get(rec.source, (rec.source, "•", "#a3a3a3"))
     safe_title = html.escape(title)
 
     if poster_url:
@@ -328,44 +303,69 @@ def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str
         short_title = title if len(title) <= 40 else title[:37] + "..."
         poster_html = f'<div class="poster-placeholder">\U0001f3ac<span>{html.escape(short_title)}</span></div>'
 
-    card_class = "movie-card movie-card--compact" if compact else "movie-card"
     return f"""
-<div class="{card_class}">
+<div class="movie-card">
   <div class="poster-wrap">
     {poster_html}
-    <span class="rank-badge">{rank}</span>
-  </div>
-  <div class="movie-card-body">
-    <div class="movie-title">{safe_title}</div>
-    <div class="movie-meta">
-      <span class="badge" style="background:{color}26; color:{color}; border-color:{color}59;">{emoji} {label}</span>
-      <span class="score">score {rec.score:.3f}</span>
+    <span class="rank-dot">{rank}</span>
+    <span class="source-dot" style="background:{color};" title="{html.escape(label)}"></span>
+    <div class="hover-meta">
+      <span class="hover-label" style="color:{color};">{html.escape(label)}</span>
+      <span class="hover-score">{rec.score:.2f}</span>
     </div>
   </div>
+  <div class="card-title" title="{safe_title}">{safe_title}</div>
 </div>
 """
 
 
-def render_recommendations(
+def render_grid(
     recs: list[Recommendation],
     movie_id_to_title: dict[str, str],
     poster_map: dict[str, str | None],
-    container,
     *,
-    compact: bool = False,
     empty_hint: str = "",
 ) -> None:
-    """Render a ranked list of recommendations as a grid (or compact list) of movie cards."""
+    """Render a ranked list of recommendations as a responsive poster grid."""
     if not recs:
-        container.markdown(f'<div class="empty-hint">No recommendations returned. {empty_hint}</div>'.strip(), unsafe_allow_html=True)
+        st.markdown(f'<div class="empty-hint">Nothing to show yet. {empty_hint}</div>'.strip(), unsafe_allow_html=True)
         return
-    cards = []
-    for rank, rec in enumerate(recs, start=1):
-        title = movie_id_to_title.get(rec.movie_id, f"Movie {rec.movie_id}")
-        poster_url = poster_map.get(rec.movie_id)
-        cards.append(_movie_card_html(rank, title, rec, poster_url, compact=compact))
-    wrapper_class = "movie-list--compact" if compact else "movie-grid"
-    container.markdown(f'<div class="{wrapper_class}">{"".join(cards)}</div>', unsafe_allow_html=True)
+    cards = [
+        _movie_card_html(rank, movie_id_to_title.get(rec.movie_id, f"Movie {rec.movie_id}"), rec, poster_map.get(rec.movie_id))
+        for rank, rec in enumerate(recs, start=1)
+    ]
+    st.markdown(f'<div class="movie-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def render_shelf(
+    icon: str,
+    title: str,
+    recs: list[Recommendation],
+    movie_id_to_title: dict[str, str],
+    poster_map: dict[str, str | None],
+    *,
+    empty_hint: str = "",
+) -> None:
+    """Render one model's recommendations as a Netflix-style horizontal scroll shelf."""
+    if recs:
+        cards = [
+            _movie_card_html(
+                rank, movie_id_to_title.get(rec.movie_id, f"Movie {rec.movie_id}"), rec, poster_map.get(rec.movie_id)
+            )
+            for rank, rec in enumerate(recs, start=1)
+        ]
+        body = f'<div class="shelf-row">{"".join(cards)}</div>'
+    else:
+        body = f'<div class="empty-hint">Nothing to show yet. {empty_hint}</div>'.strip()
+    st.markdown(
+        f"""
+<div class="shelf">
+  <div class="shelf-header"><span>{icon}</span><span class="shelf-title">{html.escape(title)}</span></div>
+  {body}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def recommend_for_new_user(
@@ -400,7 +400,7 @@ def recommend_for_new_user(
     return recommend_similar_to_picks(picked_movie_ids, content_model, svd_model, popularity_model, movies_df, n=n)
 
 
-st.markdown(CINEMA_CSS, unsafe_allow_html=True)
+st.markdown(NETFLIX_CSS, unsafe_allow_html=True)
 
 configure_kaggle_credentials_from_secrets()
 try:
@@ -421,91 +421,63 @@ tmdb_api_key = get_tmdb_api_key()
 
 st.markdown(
     """
+<div class="navbar">
+  <span class="navbar-brand">\U0001f3ac CineMatch</span>
+  <span class="navbar-tag">Indian Regional Cinema &middot; Hybrid ML Recommender</span>
+</div>
 <div class="hero">
-  <div class="hero-eyebrow">Indian Regional Movie Dataset &middot; Content-Based + SVD + Hybrid</div>
-  <h1 class="hero-title">\U0001f3ac Hybrid Movie<br>Recommendation System</h1>
-  <p class="hero-tagline">Content-based genre similarity and a from-scratch SVD collaborative filter,
-  combined by a weighted hybrid, with an explicit cold-start fallback for new users and unrated movies.</p>
+  <h1 class="hero-title">Find your next favorite film.</h1>
+  <p class="hero-tagline">Content-based genre matching and a from-scratch SVD collaborative filter, blended into
+  a hybrid model, trained on real ratings across 18 Indian languages.</p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 if not tmdb_api_key:
-    st.markdown(
-        '<div class="key-hint">\U0001f511 No TMDB_API_KEY configured &mdash; showing placeholder posters. '
-        "Add one as an env var or a Streamlit secret for real artwork.</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="key-hint">No poster API key configured &mdash; showing placeholders.</div>', unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Controls")
-    simulate_cold = st.checkbox(
-        "Simulate a brand-new user (cold start)",
-        value=False,
-        help=(
-            "Every real user in this dataset already has training ratings by construction, "
-            "so this is the only way to see the cold-start path trigger live."
-        ),
-    )
-    picked_movie_ids: list[str] = []
+toolbar = st.columns([1, 2.2, 1, 1])
+with toolbar[0]:
+    simulate_cold = st.checkbox("New user", value=False, help="Simulate a brand-new user with no rating history.")
+
+picked_movie_ids: list[str] = []
+selected_user_id: str = COLD_START_USER_ID
+with toolbar[1]:
     if simulate_cold:
-        selected_user_id = COLD_START_USER_ID
         sorted_movie_ids = sorted(movie_id_to_title, key=lambda mid: movie_id_to_title[mid])
         picked_movie_ids = st.multiselect(
-            "Movies you like (pick a few)",
+            "Movies you like",
             options=sorted_movie_ids,
             format_func=lambda mid: movie_id_to_title.get(mid, mid),
-            help="No rating history needed -- recommendations below update live from these picks.",
         )
-        if picked_movie_ids:
-            st.caption(
-                f"Personalizing from {len(picked_movie_ids)} pick(s) -- matched by genre similarity, "
-                "collaborative rating patterns, and language."
-            )
-        else:
-            st.caption("No picks yet -- showing overall trending movies until you pick a few.")
     else:
         rating_counts = train_df.groupby("user_id").size()
         user_ids = sorted(rating_counts.index.tolist())
         selected_user_id = st.selectbox(
-            "Pick a user",
-            user_ids,
-            format_func=lambda uid: f"{uid} ({rating_counts.get(uid, 0)} ratings)",
+            "User", user_ids, format_func=lambda uid: f"{uid} ({rating_counts.get(uid, 0)} ratings)"
         )
-        user_row = users_df.loc[users_df["user_id"] == selected_user_id]
-        if not user_row.empty:
-            row = user_row.iloc[0]
-            st.caption(f"Age {row['age']} · {row['gender']} · {row['occupation']}")
+with toolbar[2]:
+    n_recs = st.slider("Results", min_value=5, max_value=20, value=10)
+with toolbar[3]:
+    compare_mode = st.checkbox("Compare models", value=False)
 
-    n_recs = st.slider("Number of recommendations", min_value=5, max_value=20, value=10)
-    compare_mode = st.checkbox("Compare recommenders side-by-side", value=False)
-
-user_label = "a simulated new user" if simulate_cold else f"User {selected_user_id}"
+user_label = "a new user" if simulate_cold else f"User {selected_user_id}"
 
 if compare_mode:
-    st.subheader(f"Side-by-side comparison for {user_label}")
-    if simulate_cold:
-        st.caption(
-            "The raw Content-Based, SVD, and Hybrid models have no ratings to work with for a brand-new "
-            "user and return nothing -- that gap is exactly what the cold-start wrapper (right) exists to fill."
-        )
-    # The 4th panel is normally the plain popularity baseline, but once the user has
+    st.subheader(f"Comparing models — {user_label}")
+    # The 4th shelf is normally the plain popularity baseline, but once the user has
     # live picks it's actually showing the content+collaborative similarity blend
     # (see recommend_for_new_user) -- relabeled so the header stays honest about
-    # what's actually being ranked, rather than still calling it "Popularity Baseline".
-    fourth_panel_label = (
-        "Similar To Your Picks \U0001f3af"
-        if (simulate_cold and picked_movie_ids)
-        else "Popularity Baseline \U0001f4ca"
-    )
+    # what's actually being ranked.
+    fourth_shelf_label = "Similar To Your Picks" if (simulate_cold and picked_movie_ids) else "Popularity Baseline"
     panel_order = [
-        ("content", "Content-Based \U0001f3ad"),
-        ("svd", "SVD (Collaborative) \U0001f91d"),
-        ("hybrid", "Hybrid \U0001f500"),
-        ("popularity", fourth_panel_label),
+        ("content", "Content-Based", "\U0001f3ad"),
+        ("svd", "SVD (Collaborative)", "\U0001f91d"),
+        ("hybrid", "Hybrid", "\U0001f500"),
+        ("popularity", fourth_shelf_label, "\U0001f4ca"),
     ]
     panel_recs = {}
-    for key, _ in panel_order:
+    for key, _, _ in panel_order:
         if simulate_cold and key == "popularity":
             panel_recs[key] = recommend_for_new_user(
                 models["content"], models["svd"], models["popularity"], movies_df, picked_movie_ids, n_recs
@@ -515,19 +487,11 @@ if compare_mode:
     needed_movie_ids = {rec.movie_id for recs in panel_recs.values() for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
 
-    columns = st.columns(4)
-    for col, (model_key, title) in zip(columns, panel_order):
-        col.markdown(f"### {title}")
-        render_recommendations(
-            panel_recs[model_key],
-            movie_id_to_title,
-            poster_map,
-            col,
-            compact=True,
-            empty_hint="(no cold-start handling in this raw model)",
-        )
+    for key, title, icon in panel_order:
+        empty_hint = "Needs rating history." if simulate_cold and key != "popularity" else ""
+        render_shelf(icon, title, panel_recs[key], movie_id_to_title, poster_map, empty_hint=empty_hint)
 else:
-    st.subheader(f"Top {n_recs} recommendations for {user_label}")
+    st.subheader(f"Recommended for {user_label}")
     if simulate_cold:
         recs = recommend_for_new_user(
             models["content"], models["svd"], models["popularity"], movies_df, picked_movie_ids, n_recs
@@ -536,18 +500,12 @@ else:
         recs = models["cold_start"].recommend_for_user(selected_user_id, n=n_recs)
     needed_movie_ids = {rec.movie_id for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
-    render_recommendations(recs, movie_id_to_title, poster_map, st)
+    render_grid(recs, movie_id_to_title, poster_map)
 
-st.divider()
-st.subheader("Model performance (held-out test set)")
-metrics_df = load_metrics_table()
-if metrics_df is not None:
-    st.dataframe(metrics_df, width="stretch")
-    st.caption(
-        "RMSE/MAE: preference-score prediction error on this dataset's [-1, 1] scale, lower is better. "
-        "Precision/Recall/NDCG@K: ranking quality against the full movie catalog (no negative sampling), "
-        "higher is better, computed on a per-user random train/test split -- see claude.md for why "
-        "random rather than chronological (this dataset has no timestamps)."
-    )
-else:
-    st.info("Run `python -m src.evaluate` to generate results/metrics.json and see real metrics here.")
+with st.expander("Model performance (held-out test set)", expanded=False):
+    metrics_df = load_metrics_table()
+    if metrics_df is not None:
+        st.dataframe(metrics_df, width="stretch")
+        st.caption("RMSE/MAE: lower is better. Precision/Recall/NDCG@K: higher is better, full-catalog ranking.")
+    else:
+        st.info("Run `python -m src.evaluate` to generate results/metrics.json.")
