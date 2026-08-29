@@ -833,6 +833,32 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   take effect on the already-running container -- the code fix prevents this *class*
   of staleness on the next input change, it doesn't retroactively un-stale a
   container that already has the old cache on disk.
+- **A new, distinct wrinkle hit while doing that Reboot**: simply opening the "Manage
+  app" panel prompted Streamlit Cloud to notice `main` had moved (the merged PR #1)
+  and do its own soft "Pulling code changes from Github" update -- not a full
+  Reboot -- which crashed instantly on import with
+  `AttributeError: 'NoneType' object has no attribute '__dict__'` inside Python's own
+  `dataclasses.py`, processing `@dataclass(frozen=True) class Recommendation` in
+  `src/models.py`. Not a real defect in that code: the identical class definition had
+  already executed cleanly earlier in the very same log (the original cold start) and
+  ran cleanly again moments later after a genuine Reboot -- this only happened on the
+  in-place "pull code, re-exec without a fresh process" path, which is exactly the
+  kind of soft update this project's own history (Phase 7/8) already distrusts for
+  good reason. Root cause not chased further (looks like a `sys.modules` inconsistency
+  specific to Streamlit's script-runner re-exec racing Python's dataclasses module
+  lookup during `from __future__ import annotations` processing, not something this
+  codebase can control) -- the fix was the same Reboot already in progress, which
+  resolved it cleanly. Filed here as one more real data point for "never trust a soft
+  redeploy on this platform," not as a new action item.
+- **The Reboot's own log viewer looked stuck for several minutes** (no log line past
+  `Uvicorn server started`) in the browser tab that had been open and polling it the
+  whole time -- but a *fresh* tab navigated to the same URL immediately showed the
+  real, correct state (`st.cache_resource`'s own "Training recommender models..."
+  spinner, mid-fit), and the app finished loading normally moments later. The log
+  viewer tab itself appears to be what went stale/unresponsive (repeated CDP
+  screenshot timeouts on it), not the actual deployment -- worth remembering next
+  time a Streamlit Cloud log view looks hung: open a fresh tab on the app URL itself
+  before concluding the deploy is actually broken.
 
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
