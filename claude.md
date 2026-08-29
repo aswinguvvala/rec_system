@@ -691,6 +691,113 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   script's output matched the live UI's output exactly, movie-for-movie and in the same
   order.
 
+## Catalog broadening via TMDb discovery (Phase 12)
+- User request: "is there any way to add in more movies with similar features to the
+  dataset which is present?" Clarified via one question first, since "more movies"
+  splits into two very different asks: broadening the catalog's metadata (more titles
+  to browse/pick from) vs. finding more real per-user ratings. User chose the former --
+  the latter would mean redoing Phase 7's real, already-exhausted search for a second
+  legitimate Indian-regional per-user-ratings dataset.
+- **New module `src/movie_discovery.py`**, same conventions as `src/posters.py`
+  (`requests`-based, no Streamlit dependency, every network call wrapped in
+  try/except returning `None`/best-effort rather than raising, `REQUEST_TIMEOUT_SECONDS`
+  on every call). `discover_candidate_ids` walks TMDb's `/discover/movie` endpoint
+  per language (`with_original_language`, `sort_by=popularity.desc`,
+  `vote_count.gte=5` as a quality floor against zero-data placeholder entries);
+  `fetch_movie_detail` pulls `/movie/{id}?append_to_response=external_ids` for the
+  real IMDb `tt` id (this dataset's actual `movie_id` join key -- see Phase 7);
+  `_normalize_detail` maps the result into the *exact* schema `load_movies` already
+  produces (`movie_id`, `title`, `release_year`, `imdb_rating`, `languages`, one
+  column per `GENRE_COLUMNS`), so no downstream code needed to special-case
+  TMDb-sourced rows. `imdb_rating` is deliberately left `NaN` for every supplementary
+  row rather than backfilled from TMDb's own `vote_average` -- that column is
+  documented as IMDb's own score, and nothing currently reads it, but conflating a
+  different rating source into it would be a quiet, misleading data-quality
+  regression for whoever reads it next.
+- **Real bug caught before ever writing the output**: an early run surfaced upcoming/
+  unreleased titles (TMDb's popularity ranking surfaces hype for
+  announced sequels right alongside real releases, e.g. a handful of 2026 titles that
+  had enough early hype-votes to pass the `vote_count.gte=5` floor). Fixed by checking
+  TMDb's own `status == "Released"` field in `_normalize_detail` -- the authoritative
+  "has this actually come out" signal, more reliable than comparing `release_date` to
+  today (which varies by region/festival cut). A recommendation catalog entry nobody
+  could have actually watched doesn't belong in it.
+- **Genre taxonomy mapped, not assumed compatible**: TMDb's genre vocabulary doesn't
+  line up 1:1 with this dataset's real, discovered 21-genre `GENRE_COLUMNS` (see
+  Phase 7). `TMDB_GENRE_NAME_MAP` maps only the names present in both (including
+  TMDb's "Science Fiction" -> this dataset's "Sci-Fi"); a TMDb genre with no home here
+  (Documentary, TV Movie) is silently dropped, the same thing the base loader already
+  does for any raw genre string outside `GENRE_COLUMNS` -- a supplementary movie with
+  only an unmapped genre just gets an all-zero genre vector, same as ~24% of the base
+  catalog already has, not a new failure mode.
+- **Output is a small, git-tracked artifact, not a live pipeline dependency**: run
+  once locally via `python -m src.movie_discovery` (requires `TMDB_API_KEY` in the
+  environment) to write `catalog_supplement/tmdb_supplementary_movies.csv` --
+  deliberately outside `data/` (which is entirely gitignored and re-downloaded fresh)
+  since this file is small, deterministic-ish, and meant to be committed and reviewed,
+  the same "real artifact, not silently regenerated on every deploy" convention
+  `results/metrics.json` already established. Its absence is never fatal: a fresh
+  clone with no supplementary file just gets the base 2,850-movie catalog.
+  `src/data_pipeline.py` gained `load_supplementary_movies` (reads it, or returns an
+  empty correctly-shaped frame if missing/unreadable) and `merge_supplementary_movies`
+  (unions it into the base catalog, keeping the base dataset's row on any `movie_id`
+  collision -- the real per-user-rated data is authoritative for any title it already
+  has an opinion about), wired into `run_pipeline` right after `load_movies`.
+- **Real isolation bug caught by the existing test suite, not by inspection**: the
+  first version of this wiring called `load_supplementary_movies()` with no argument,
+  so it always read the real, committed `catalog_supplement/` file regardless of the
+  `raw_dir`/`processed_dir` overrides tests use for isolation -- broke
+  `TestRunPipelineCacheInvalidation` immediately (551 movies instead of the test's
+  expected 1) because the real 550-row supplement silently merged into what was
+  supposed to be a fully isolated fake dataset. Fixed by adding a
+  `supplementary_movies_path` parameter to `run_pipeline` (defaulting to the same
+  module-level path, but overridable), same pattern `raw_dir`/`processed_dir` already
+  use, and updated the one affected test to pass an isolated nonexistent path.
+  General lesson: any file path a pipeline function reads from a module-level default
+  needs to be a parameter, not a hardcoded call, the moment that file might actually
+  exist on disk during a test run -- `raw_dir`/`processed_dir` already knew this;
+  the new supplementary path initially didn't.
+- **Real, run numbers**: discovered candidates across 13 languages with a real ISO
+  639-1 code (Hindi, Telugu, Tamil, Kannada, Malayalam, Bengali, Marathi, Panjabi,
+  Gujarati, Urdu, Oriya, Assamese, Nepali -- a few languages already in the base
+  dataset, Manipuri/Haryanvi/Chhattisgarhi/Konkani, have no such code and can't be
+  targeted this way). First run used 4 pages/language (~80 candidates/language cap):
+  705 candidates discovered, 550 kept. The user then asked for at least 1,000 more
+  movies, so the run was redone at 10 pages/language (200/language cap) -- real
+  majority-language catalogs (Hindi/Telugu/Tamil/Malayalam) were still hitting the
+  page cap at 4 pages (genuinely more available, not exhausted), so raising it scaled
+  real yield rather than padding with lower-quality results; several already-smaller
+  languages (Panjabi, Gujarati, Urdu, Oriya, Assamese, Nepali) were already exhausted
+  under 4 pages and returned identically. Final real numbers: 1,340 candidates
+  discovered, **1,068 kept** after dropping ones missing a real IMDb id, unreleased,
+  or already present in the base dataset. Catalog grew **2,850 -> 3,918 movies**
+  (`python -m src.data_pipeline` confirmed real end-to-end: 20,652 ratings / 16,703
+  train / 3,826 test rows unchanged both times, since supplementary movies carry zero
+  ratings by construction -- referential-integrity cleanup and the train/test split
+  are completely unaffected by catalog size). `results/metrics.json` re-run and
+  re-committed after each catalog size, per the project's own "don't hand-copy
+  numbers, keep the real artifact in sync" convention (Phase 3): SVD/Popularity
+  metrics unchanged both times (both only ever rank among the 1,274 movies with real
+  training ratings, so the new zero-rating movies are invisible to them, same as
+  ~1,576 pre-existing zero-rating movies already were); content-based and hybrid's
+  ranking metrics dropped further at the larger catalog size (a bigger all-candidate
+  pool is a harder ranking task, and content-based -- already the weakest model, see
+  Phase 7 -- felt it most) -- a real, honest effect, not a regression; the headline
+  "who wins which metric" story is unchanged at both catalog sizes.
+- **Verified live** with the browser tool at the final 3,918-movie catalog size, not
+  just via pytest (which has never unit-imported `app.py`, per convention): searched
+  the new-user picker for "Jawan" (2023) -- a supplementary-only title, absent from
+  the original ~2018-vintage dataset -- confirmed selectable, and picking it re-ranked
+  recommendations in real time to genuine action/thriller neighbors including several
+  other supplementary titles (War 2, Pathaan, Tiger 3, Dhurandhar: The Revenge, Ek Tha
+  Tiger) via real content-based similarity (gold `source="hybrid"` dots, not a
+  popularity fallback). Compare-mode re-checked too: raw Content/SVD/Hybrid columns
+  correctly still show "Needs rating history" for a cold-start user (unaffected by
+  the catalog change), "Similar To Your Picks" shelf shows the same real neighbors.
+  No exceptions in any state. 10 new tests in `tests/test_movie_discovery.py` plus 8
+  more in `tests/test_data_pipeline.py` for the new pipeline functions; 133 tests
+  total, all green.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
@@ -700,6 +807,7 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
 - Run app: `streamlit run app.py`
 - Run tests: `pytest tests/ -v`
 - Run data pipeline standalone: `python -m src.data_pipeline`
+- Regenerate the supplementary movie catalog: `python -m src.movie_discovery` (requires `TMDB_API_KEY` in the environment; see Phase 12)
 - Lint: `ruff check src/`
 - Install deps: `pip install -r requirements.txt`
 
@@ -716,6 +824,7 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
 - `src/models.py` — `ContentBasedRecommender`, `SVDRecommender`, `HybridRecommender`, cold-start fallback wrapper; rating scale is `[-1, 1]` (see Phase 7), ids are strings
 - `src/evaluate.py` — RMSE/MAE plus Precision@K, Recall@K, NDCG@K
 - `src/posters.py` — optional TMDb poster-image lookup, by IMDb id (preferred, exact) or by title (fallback); no Streamlit dependency
+- `src/movie_discovery.py` — one-time TMDb catalog-broadening tool (see Phase 12); writes the git-tracked `catalog_supplement/tmdb_supplementary_movies.csv` that `data_pipeline.py` optionally merges in
 - `app.py` — Streamlit demo; must run standalone from a fresh clone with no manual setup beyond `pip install` **and a Kaggle API token** (see Phase 7 -- unlike MovieLens, this dataset has no unauthenticated public URL, so this is the one hard prerequisite that can't be made optional). Also owns the cinema theme's bespoke CSS (`.streamlit/config.toml` sets the base widget theme)
 
 ## Do not
