@@ -52,12 +52,12 @@ st.set_page_config(
 # Sentinel guaranteed absent from this dataset's real (free-text, human-typed) user ids.
 COLD_START_USER_ID = "__simulated_new_user__"
 
-# label, emoji (used in shelf headers / tooltips only, not on every card), accent color.
-SOURCE_META: dict[str, tuple[str, str, str]] = {
-    "content": ("Content-Based", "\U0001f3ad", "#2dd4bf"),
-    "svd": ("SVD (Collaborative)", "\U0001f91d", "#a78bfa"),
-    "hybrid": ("Hybrid", "\U0001f500", "#f5c518"),
-    "cold_start": ("Popularity", "\U0001f4ca", "#38bdf8"),
+# label, accent color.
+SOURCE_META: dict[str, tuple[str, str]] = {
+    "content": ("Content-Based", "#2dd4bf"),
+    "svd": ("SVD (Collaborative)", "#a78bfa"),
+    "hybrid": ("Hybrid", "#f5c518"),
+    "cold_start": ("Popularity", "#38bdf8"),
 }
 
 NETFLIX_CSS = """
@@ -292,7 +292,7 @@ def _movie_card_html(rank: int, title: str, rec: Recommendation, poster_url: str
     overlay -- keeping the default (and any static screenshot) clean while
     still exposing which model produced each pick for anyone who hovers.
     """
-    label, _emoji, color = SOURCE_META.get(rec.source, (rec.source, "•", "#a3a3a3"))
+    label, color = SOURCE_META.get(rec.source, (rec.source, "#a3a3a3"))
     safe_title = html.escape(title)
 
     if poster_url:
@@ -336,7 +336,6 @@ def render_grid(
 
 
 def render_shelf(
-    icon: str,
     title: str,
     recs: list[Recommendation],
     movie_id_to_title: dict[str, str],
@@ -358,7 +357,7 @@ def render_shelf(
     st.markdown(
         f"""
 <div class="shelf">
-  <div class="shelf-header"><span>{icon}</span><span class="shelf-title">{html.escape(title)}</span></div>
+  <div class="shelf-header"><span class="shelf-title">{html.escape(title)}</span></div>
   {body}
 </div>
 """,
@@ -467,13 +466,13 @@ if compare_mode:
     # what's actually being ranked.
     fourth_shelf_label = "Similar To Your Picks" if (simulate_cold and picked_movie_ids) else "Popularity Baseline"
     panel_order = [
-        ("content", "Content-Based", "\U0001f3ad"),
-        ("svd", "SVD (Collaborative)", "\U0001f91d"),
-        ("hybrid", "Hybrid", "\U0001f500"),
-        ("popularity", fourth_shelf_label, "\U0001f4ca"),
+        ("content", "Content-Based"),
+        ("svd", "SVD (Collaborative)"),
+        ("hybrid", "Hybrid"),
+        ("popularity", fourth_shelf_label),
     ]
     panel_recs = {}
-    for key, _, _ in panel_order:
+    for key, _ in panel_order:
         if simulate_cold and key == "popularity":
             panel_recs[key] = recommend_for_new_user(
                 models["content"], models["svd"], models["popularity"], movies_df, picked_movie_ids, n_recs
@@ -483,9 +482,9 @@ if compare_mode:
     needed_movie_ids = {rec.movie_id for recs in panel_recs.values() for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
 
-    for key, title, icon in panel_order:
+    for key, title in panel_order:
         empty_hint = "Needs rating history." if simulate_cold and key != "popularity" else ""
-        render_shelf(icon, title, panel_recs[key], movie_id_to_title, poster_map, empty_hint=empty_hint)
+        render_shelf(title, panel_recs[key], movie_id_to_title, poster_map, empty_hint=empty_hint)
 else:
     st.subheader(f"Recommended for {user_label}")
     if simulate_cold:
