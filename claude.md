@@ -893,6 +893,48 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   (138 passed). Verified live locally via the browser tool: navbar now reads plain
   "MOVIEMATCH" (no emoji), centered, browser tab title reads "MovieMatch".
 
+## Remove the model-performance expander; a real centering bug found and fixed (Phase 13c)
+- User feedback, two things: (1) didn't understand what the collapsed "Model
+  performance (held-out test set)" expander at the bottom of the page was, and wanted
+  it removed; (2) the hero tagline ("Get recommendations for movies to watch.") still
+  wasn't actually centered, despite Phase 13's CSS change.
+- Removed the expander entirely from `app.py` (it rendered `results/metrics.json` as a
+  table -- the RMSE/MAE/Precision/Recall/NDCG@K comparison discussed at length in
+  earlier phases -- reasonable for a technical README but out of place in the
+  simplified end-user recommendation UI this has become). `load_metrics_table()` was
+  only called from that block, so it was deleted too, along with the `import json` and
+  `from src.utils import RESULTS_DIR` that only it used -- removed rather than left as
+  dead code, per this project's own conventions.
+- **The centering bug was real, and the actual root cause was different from what
+  Phase 13's fix addressed.** Verified with the browser tool's `getComputedStyle`
+  rather than guessing from screenshots alone (screenshots alone had already looked
+  "close enough" once before and were wrong): `text-align: center` was in fact being
+  applied correctly the whole time -- the actual problem was `margin: 0 auto` (meant
+  to center the `<p>` element's own box) resolving to `margin: 0px 0px` instead,
+  because Streamlit's own generated CSS (an emotion-cache class like
+  `.st-emotion-cache-XXXX p`) sets `margin-left`/`margin-right: 0px` on every `<p>`
+  tag with higher specificity (one class + one element selector) than this project's
+  single-class `.hero-tagline` selector -- confirmed directly by enumerating
+  `document.styleSheets` for every rule matching the element, not inferred. A first
+  attempted fix (adding `!important` to `text-align` alone, and separately trying
+  `width: fit-content`) didn't work because neither addressed the actual winning
+  rule's target property (`margin-left`/`margin-right`). The real fix:
+  `margin: 0 auto !important` on `.hero-tagline`, which only works combined with an
+  explicit `width: fit-content` (not just `max-width`) -- per the CSS spec, `margin:
+  auto` only centers a box when its `width` is a definite value; with `width` left at
+  its default `auto`, only capped by `max-width`, the browser's own auto-margin
+  resolution (independent of Streamlit's rule) sets the margins to `0`, not centered.
+  Both pieces were necessary; either alone still left it left-aligned.
+- General lesson: when a CSS fix "looks right" in a screenshot but a user reports it's
+  still wrong, verify with `getComputedStyle`/`document.styleSheets` before trying a
+  second guess -- it found the exact competing rule and the exact wrong property in
+  one query, instead of iterating on assumptions about `!important`/specificity that
+  happened to be adjacent to the real cause but not it.
+- No `src/` changes; `pytest tests/ -v` unaffected (138 passed). Verified live locally
+  via the browser tool, confirmed with `getComputedStyle` (not just a screenshot) that
+  the tagline's bounding-box center now exactly matches the title's, and that the page
+  ends after the recommendation grid with no expander below it.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

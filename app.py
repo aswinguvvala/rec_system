@@ -25,7 +25,6 @@ status and error messages in a Streamlit UI.
 """
 
 import html
-import json
 import os
 
 import pandas as pd
@@ -42,7 +41,6 @@ from src.models import (
     recommend_similar_to_picks,
 )
 from src.posters import get_poster_urls_by_imdb_id
-from src.utils import RESULTS_DIR
 
 st.set_page_config(
     page_title="MovieMatch",
@@ -111,7 +109,16 @@ html, body, [class*="css"] { font-family: var(--font); }
     font-weight: 800; font-size: 2.3rem; line-height: 1.15;
     color: var(--text); margin: 0 0 .5rem; letter-spacing: -.01em;
 }
-.hero-tagline { font-size: .92rem; color: var(--text-muted); max-width: 68ch; line-height: 1.5; margin: 0 auto; }
+.hero-tagline {
+    font-size: .92rem; color: var(--text-muted); line-height: 1.5; text-align: center;
+    width: fit-content; max-width: 68ch;
+    /* !important is load-bearing, confirmed via computed styles: Streamlit's own
+    generated CSS (a rule like ".st-emotion-cache-XXXX p") sets margin-left/
+    margin-right: 0px on every <p> with higher specificity (one class + one element
+    selector) than a single-class selector here, so a plain `margin: 0 auto` loses
+    and the box sits flush left despite text-align: center being applied correctly. */
+    margin: 0 auto !important;
+}
 .key-hint { font-size: .78rem; color: var(--text-muted); margin: -.4rem 0 .5rem; }
 
 /* Toolbar -- replaces the old sidebar; one horizontal bar of native widgets */
@@ -216,14 +223,6 @@ def load_models() -> dict[str, object]:
     for model in registry.values():
         model.fit(train_df, movies_df)
     return registry
-
-
-@st.cache_data
-def load_metrics_table() -> pd.DataFrame | None:
-    path = RESULTS_DIR / "metrics.json"
-    if not path.exists():
-        return None
-    return pd.DataFrame(json.loads(path.read_text())).T.round(4)
 
 
 def get_tmdb_api_key() -> str | None:
@@ -498,11 +497,3 @@ else:
     needed_movie_ids = {rec.movie_id for rec in recs}
     poster_map = load_posters(tuple(sorted(needed_movie_ids)), tmdb_api_key)
     render_grid(recs, movie_id_to_title, poster_map)
-
-with st.expander("Model performance (held-out test set)", expanded=False):
-    metrics_df = load_metrics_table()
-    if metrics_df is not None:
-        st.dataframe(metrics_df, width="stretch")
-        st.caption("RMSE/MAE: lower is better. Precision/Recall/NDCG@K: higher is better, full-catalog ranking.")
-    else:
-        st.info("Run `python -m src.evaluate` to generate results/metrics.json.")
