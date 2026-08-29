@@ -15,8 +15,10 @@ from src.data_pipeline import (
     download_indian_movies_dataset,
     load_movies,
     load_ratings,
+    load_supplementary_movies,
     load_users,
     merge_data,
+    merge_supplementary_movies,
     random_train_test_split,
     run_pipeline,
 )
@@ -184,6 +186,75 @@ class TestLoadMovies:
             load_movies(tmp_path)
 
 
+class TestLoadSupplementaryMovies:
+    def test_missing_file_returns_empty_correctly_shaped_frame(self, tmp_path):
+        df = load_supplementary_movies(tmp_path / "does_not_exist.csv")
+
+        assert df.empty
+        assert list(df.columns) == ["movie_id", "title", "release_year", "imdb_rating", "languages", *GENRE_COLUMNS]
+
+    def test_malformed_file_returns_empty_frame_instead_of_raising(self, tmp_path):
+        path = tmp_path / "supplement.csv"
+        path.write_text("", encoding="utf-8")  # empty file -> EmptyDataError
+
+        df = load_supplementary_movies(path)
+
+        assert df.empty
+
+    def test_valid_file_is_loaded_with_string_movie_ids(self, tmp_path):
+        path = tmp_path / "supplement.csv"
+        pd.DataFrame(
+            [{"movie_id": "tt0000123", "title": "Extra Movie", "release_year": 2020,
+              "imdb_rating": float("nan"), "languages": "Telugu", **{g: 0 for g in GENRE_COLUMNS}}]
+        ).to_csv(path, index=False)
+
+        df = load_supplementary_movies(path)
+
+        assert df.iloc[0]["movie_id"] == "tt0000123"
+        assert isinstance(df.iloc[0]["movie_id"], str)
+
+
+class TestMergeSupplementaryMovies:
+    def _base_movies(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{"movie_id": "tt0001", "title": "Base Movie", "release_year": 2015,
+              "imdb_rating": 7.5, "languages": "Hindi", **{g: 0 for g in GENRE_COLUMNS}}]
+        )
+
+    def test_empty_supplement_returns_base_unchanged(self):
+        base = self._base_movies()
+        empty = pd.DataFrame(columns=base.columns)
+
+        result = merge_supplementary_movies(base, empty)
+
+        assert len(result) == 1
+        assert result.iloc[0]["movie_id"] == "tt0001"
+
+    def test_new_supplementary_movie_is_appended(self):
+        base = self._base_movies()
+        supplement = pd.DataFrame(
+            [{"movie_id": "tt0002", "title": "New Movie", "release_year": 2021,
+              "imdb_rating": float("nan"), "languages": "Telugu", **{g: 0 for g in GENRE_COLUMNS}}]
+        )
+
+        result = merge_supplementary_movies(base, supplement)
+
+        assert set(result["movie_id"]) == {"tt0001", "tt0002"}
+
+    def test_colliding_movie_id_keeps_the_base_row(self):
+        base = self._base_movies()
+        supplement = pd.DataFrame(
+            [{"movie_id": "tt0001", "title": "Should Not Win", "release_year": 1999,
+              "imdb_rating": float("nan"), "languages": "Tamil", **{g: 0 for g in GENRE_COLUMNS}}]
+        )
+
+        result = merge_supplementary_movies(base, supplement)
+
+        assert len(result) == 1
+        assert result.iloc[0]["title"] == "Base Movie"
+        assert result.iloc[0]["languages"] == "Hindi"
+
+
 def _write_users_csv(tmp_path, rows: list[dict]) -> None:
     fieldnames = ["_id", "languages", "job", "state", "dob", "gender"]
     with (tmp_path / "users.csv").open("w", newline="", encoding="utf-8") as f:
@@ -328,7 +399,10 @@ class TestRunPipelineCacheInvalidation:
 
         monkeypatch.setattr("kaggle.api.authenticate", _fail_if_called)
 
-        result = run_pipeline(raw_dir=raw_dir, processed_dir=processed_dir)
+        result = run_pipeline(
+            raw_dir=raw_dir, processed_dir=processed_dir,
+            supplementary_movies_path=tmp_path / "no_supplement_here.csv",
+        )
 
         # Rebuilt from the real raw data, not the stale processed cache -- proven by the
         # rebuilt movies frame actually having the full real genre taxonomy.

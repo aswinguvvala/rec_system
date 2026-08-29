@@ -21,8 +21,11 @@ below, and both are load-bearing enough to call out up front:
 
 Pipeline stages: :func:`download_indian_movies_dataset` (cached download +
 extract) -> :func:`load_ratings` / :func:`load_movies` / :func:`load_users`
-(parse the raw files) -> :func:`merge_data` (join into one denormalized
-frame) -> :func:`random_train_test_split` (per-user split).
+(parse the raw files) -> :func:`merge_supplementary_movies` (optionally
+folds in a TMDb-sourced catalog of additional Indian-regional movies with no
+ratings of their own -- see ``src/movie_discovery.py``) -> :func:`merge_data`
+(join into one denormalized frame) -> :func:`random_train_test_split`
+(per-user split).
 :func:`run_pipeline` orchestrates all of the above, plus referential-integrity
 cleanup (dropping ratings that reference a user/movie that got filtered out
 elsewhere -- see its docstring), and writes the processed CSVs to
@@ -41,7 +44,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.utils import PROCESSED_DATA_DIR, RAW_DATA_DIR, ensure_dir, get_logger
+from src.utils import (
+    PROCESSED_DATA_DIR,
+    RAW_DATA_DIR,
+    SUPPLEMENTARY_MOVIES_PATH,
+    ensure_dir,
+    get_logger,
+)
 
 logger = get_logger(__name__)
 
@@ -201,6 +210,61 @@ def load_movies(raw_dir: Path) -> pd.DataFrame:
         movies[genre] = genre_lists.apply(lambda genres, g=genre: int(g in genres))
 
     return movies.drop_duplicates(subset="movie_id").reset_index(drop=True)
+
+
+def load_supplementary_movies(path: Path = SUPPLEMENTARY_MOVIES_PATH) -> pd.DataFrame:
+    """Load the optional TMDb-sourced supplementary movie catalog, if present.
+
+    Built once by ``python -m src.movie_discovery`` (see that module) and
+    committed to the repo -- absent by default until that's been run.
+    Missing or unreadable is never fatal: :func:`run_pipeline` works fine
+    without it, just with a smaller catalog, the same graceful-degradation
+    convention ``src/posters.py`` uses for a missing TMDb key.
+
+    Args:
+        path: Path to the supplementary CSV, in the same schema
+            :func:`load_movies` produces.
+
+    Returns:
+        DataFrame with ``movie_id``, ``title``, ``release_year``,
+        ``imdb_rating``, ``languages``, and one column per
+        :data:`GENRE_COLUMNS`. Empty (but correctly shaped) if the file is
+        missing or fails to parse.
+    """
+    empty = pd.DataFrame(columns=["movie_id", "title", "release_year", "imdb_rating", "languages", *GENRE_COLUMNS])
+    if not path.exists():
+        return empty
+    try:
+        return pd.read_csv(path, dtype={"movie_id": str})
+    except (pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        logger.warning("Failed to read supplementary movie catalog at %s: %s -- ignoring it.", path, exc)
+        return empty
+
+
+def merge_supplementary_movies(base_movies: pd.DataFrame, supplementary_movies: pd.DataFrame) -> pd.DataFrame:
+    """Union in supplementary movies, keeping the base dataset's row on any id collision.
+
+    Args:
+        base_movies: Output of :func:`load_movies` (the real Kaggle-sourced catalog).
+        supplementary_movies: Output of :func:`load_supplementary_movies`.
+
+    Returns:
+        ``base_movies`` with any non-overlapping supplementary rows appended.
+        A ``movie_id`` already present in ``base_movies`` always wins --
+        the real per-user-rated dataset is authoritative for any title it
+        already has an opinion about.
+    """
+    if supplementary_movies.empty:
+        return base_movies
+    combined = pd.concat([base_movies, supplementary_movies], ignore_index=True)
+    combined = combined.drop_duplicates(subset="movie_id", keep="first").reset_index(drop=True)
+    n_added = len(combined) - len(base_movies)
+    n_skipped = len(supplementary_movies) - n_added
+    logger.info(
+        "Merged %d supplementary movie(s) into the catalog (%d already present, skipped)",
+        n_added, n_skipped,
+    )
+    return combined
 
 
 def _is_junk_user_id(user_id: str) -> bool:
@@ -425,6 +489,7 @@ def _processed_cache_is_usable(movies_path: Path) -> bool:
 def run_pipeline(
     raw_dir: Path = RAW_DATA_DIR,
     processed_dir: Path = PROCESSED_DATA_DIR,
+    supplementary_movies_path: Path = SUPPLEMENTARY_MOVIES_PATH,
     force: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Run the full pipeline: download, load, clean, split, and persist.
@@ -438,6 +503,12 @@ def run_pipeline(
     Args:
         raw_dir: Directory for the raw/cached dataset download.
         processed_dir: Directory to write/read processed CSVs.
+        supplementary_movies_path: Path to the optional TMDb-sourced
+            supplementary movie catalog (see :func:`load_supplementary_movies`
+            and ``src/movie_discovery.py``). Exposed as a parameter (rather
+            than always reading the module-level default) so tests can
+            isolate a fake raw/processed dir without also picking up the
+            real, git-tracked supplementary file sitting in the repo.
         force: If True, re-run and overwrite even if processed files exist.
 
     Returns:
@@ -467,6 +538,7 @@ def run_pipeline(
     raw_dir_path = download_indian_movies_dataset(raw_dir)
     ratings = load_ratings(raw_dir_path)
     movies = load_movies(raw_dir_path)
+    movies = merge_supplementary_movies(movies, load_supplementary_movies(supplementary_movies_path))
     users = load_users(raw_dir_path)
     logger.info(
         "Loaded %d ratings, %d movies, %d users (before referential-integrity cleanup)",

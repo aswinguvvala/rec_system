@@ -16,6 +16,13 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 RAW_DATA_DIR: Path = DATA_DIR / "raw"
 PROCESSED_DATA_DIR: Path = DATA_DIR / "processed"
 RESULTS_DIR: Path = PROJECT_ROOT / "results"
+# Deliberately NOT under DATA_DIR: data/ is entirely gitignored and
+# regenerated from a fresh download on every clone, but the supplementary
+# movie catalog (see src/movie_discovery.py) is a small, one-time-generated,
+# git-tracked artifact -- same "real artifact, not silently regenerated"
+# convention as RESULTS_DIR/metrics.json.
+SUPPLEMENTARY_CATALOG_DIR: Path = PROJECT_ROOT / "catalog_supplement"
+SUPPLEMENTARY_MOVIES_PATH: Path = SUPPLEMENTARY_CATALOG_DIR / "tmdb_supplementary_movies.csv"
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
