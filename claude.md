@@ -798,6 +798,68 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   more in `tests/test_data_pipeline.py` for the new pipeline functions; 133 tests
   total, all green.
 
+## Fifth caching-related deploy break: same root cause, a new shape (Phase 12b)
+- After merging Phase 12's PR, the user asked directly "is it live?" -- checked the
+  real deployed site (not assumed): searching "Jawan" in the onboarding picker only
+  showed pre-existing base-catalog titles, confirming the supplement never made it
+  onto the live app.
+- Root cause, same failure class as Phase 7/8's first two caching breaks but a new
+  concrete shape: `_processed_cache_is_usable` only ever checked that a cached
+  `movies.csv` had the right *columns*. The catalog-broadening merge didn't touch a
+  single column -- it only added rows -- so a container's already-cached, pre-Phase-12
+  `movies.csv` (2,850 rows, every genre column present) satisfied that check
+  perfectly and the pipeline never re-ran `merge_supplementary_movies`, regardless of
+  whether the new code had even deployed. A schema-only check can't see a
+  content/row-count-only staleness.
+- Fixed by hardening `_processed_cache_is_usable` itself, not by telling the user to
+  just reboot and hope it doesn't recur: it now takes an optional
+  `supplementary_movies_path` and, when given, confirms every one of that file's
+  `movie_id`s is already present in the cached `movies.csv` before trusting the
+  cache -- catches this specific "right schema, stale content" case the column-only
+  check structurally couldn't. `run_pipeline` now passes its own
+  `supplementary_movies_path` through to the check. 5 new tests (unit-level cache
+  logic plus a real end-to-end `run_pipeline` integration test reproducing the exact
+  live scenario: a schema-valid cache missing the supplementary movie, next to a
+  valid raw dataset and a real supplement file -- asserts the pipeline rebuilds and
+  the merge actually happens). 138 tests total, all green.
+- **General lesson, sharpened from Phase 7/8's**: "does the cache match the current
+  schema" and "does the cache reflect the current *inputs*" are different questions --
+  a schema-only staleness check will always miss a same-schema content change. Any
+  future input to this pipeline that can change without changing `movies.csv`'s
+  columns (this supplementary catalog is the first, but not necessarily the last)
+  needs its own explicit check here, not an assumption that the schema check already
+  covers it.
+- Still required an explicit Reboot from the Streamlit Cloud dashboard to actually
+  take effect on the already-running container -- the code fix prevents this *class*
+  of staleness on the next input change, it doesn't retroactively un-stale a
+  container that already has the old cache on disk.
+- **A new, distinct wrinkle hit while doing that Reboot**: simply opening the "Manage
+  app" panel prompted Streamlit Cloud to notice `main` had moved (the merged PR #1)
+  and do its own soft "Pulling code changes from Github" update -- not a full
+  Reboot -- which crashed instantly on import with
+  `AttributeError: 'NoneType' object has no attribute '__dict__'` inside Python's own
+  `dataclasses.py`, processing `@dataclass(frozen=True) class Recommendation` in
+  `src/models.py`. Not a real defect in that code: the identical class definition had
+  already executed cleanly earlier in the very same log (the original cold start) and
+  ran cleanly again moments later after a genuine Reboot -- this only happened on the
+  in-place "pull code, re-exec without a fresh process" path, which is exactly the
+  kind of soft update this project's own history (Phase 7/8) already distrusts for
+  good reason. Root cause not chased further (looks like a `sys.modules` inconsistency
+  specific to Streamlit's script-runner re-exec racing Python's dataclasses module
+  lookup during `from __future__ import annotations` processing, not something this
+  codebase can control) -- the fix was the same Reboot already in progress, which
+  resolved it cleanly. Filed here as one more real data point for "never trust a soft
+  redeploy on this platform," not as a new action item.
+- **The Reboot's own log viewer looked stuck for several minutes** (no log line past
+  `Uvicorn server started`) in the browser tab that had been open and polling it the
+  whole time -- but a *fresh* tab navigated to the same URL immediately showed the
+  real, correct state (`st.cache_resource`'s own "Training recommender models..."
+  spinner, mid-fit), and the app finished loading normally moments later. The log
+  viewer tab itself appears to be what went stale/unresponsive (repeated CDP
+  screenshot timeouts on it), not the actual deployment -- worth remembering next
+  time a Streamlit Cloud log view looks hung: open a fresh tab on the app URL itself
+  before concluding the deploy is actually broken.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

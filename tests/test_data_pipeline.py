@@ -352,6 +352,43 @@ class TestProcessedCacheIsUsable:
 
         assert _processed_cache_is_usable(movies_path) is False
 
+    def _movies_csv(self, path, movie_ids):
+        pd.DataFrame(
+            [{"movie_id": mid, "title": mid, **{g: 0 for g in GENRE_COLUMNS}} for mid in movie_ids]
+        ).to_csv(path, index=False)
+
+    def test_no_supplementary_path_skips_the_supplement_check(self, tmp_path):
+        movies_path = tmp_path / "movies.csv"
+        self._movies_csv(movies_path, ["tt0001"])
+
+        assert _processed_cache_is_usable(movies_path, supplementary_movies_path=None) is True
+
+    def test_missing_supplementary_file_skips_the_supplement_check(self, tmp_path):
+        movies_path = tmp_path / "movies.csv"
+        self._movies_csv(movies_path, ["tt0001"])
+
+        assert _processed_cache_is_usable(movies_path, tmp_path / "no_supplement.csv") is True
+
+    def test_cache_missing_supplementary_rows_is_not_usable(self, tmp_path):
+        # Reproduces the real bug found on the live deploy: pushing a code change that adds
+        # a supplementary catalog left the site serving the pre-supplement cache, because a
+        # same-schema cache passed the old check even though it was missing every
+        # supplementary row.
+        movies_path = tmp_path / "movies.csv"
+        self._movies_csv(movies_path, ["tt0001"])  # cache predates the supplement
+        supplementary_path = tmp_path / "supplement.csv"
+        self._movies_csv(supplementary_path, ["tt0002"])
+
+        assert _processed_cache_is_usable(movies_path, supplementary_path) is False
+
+    def test_cache_already_containing_supplementary_rows_is_usable(self, tmp_path):
+        movies_path = tmp_path / "movies.csv"
+        self._movies_csv(movies_path, ["tt0001", "tt0002"])  # already merged
+        supplementary_path = tmp_path / "supplement.csv"
+        self._movies_csv(supplementary_path, ["tt0002"])
+
+        assert _processed_cache_is_usable(movies_path, supplementary_path) is True
+
 
 class TestRunPipelineCacheInvalidation:
     def test_stale_processed_cache_is_rebuilt_not_trusted(self, tmp_path, monkeypatch):
@@ -408,3 +445,68 @@ class TestRunPipelineCacheInvalidation:
         # rebuilt movies frame actually having the full real genre taxonomy.
         assert set(GENRE_COLUMNS).issubset(result["movies"].columns)
         assert list(result["movies"]["movie_id"]) == ["tt001"]
+
+    def test_cache_predating_a_supplementary_catalog_is_rebuilt_not_trusted(self, tmp_path, monkeypatch):
+        # Reproduces the exact bug found on the live deploy: a code push added a
+        # supplementary catalog, but the container's already-cached movies.csv (same
+        # schema, just missing the new rows) satisfied the old "right columns" check
+        # alone, so the site kept serving the pre-supplement catalog indefinitely.
+        raw_dir = tmp_path / "raw"
+        processed_dir = tmp_path / "processed"
+        extracted = raw_dir / "indian_movies"
+        extracted.mkdir(parents=True)
+
+        _write_movies_csv(
+            extracted,
+            [
+                {
+                    "movie_id": "tt001",
+                    "description": "",
+                    "language": "[]",
+                    "released": "2020-01-01T00:00:00.000Z",
+                    "rating": "8.0",
+                    "writer": "[]",
+                    "director": "[]",
+                    "cast": "[]",
+                    "genre": json.dumps(["Drama"]),
+                    "name": "A Real Movie",
+                }
+            ],
+        )
+        _write_users_csv(
+            extracted,
+            [{"_id": "realuser1", "languages": "[]", "job": "Student", "state": "Delhi", "dob": "16-06-2000", "gender": "Male"}],
+        )
+        (extracted / "ratings.json").write_text(
+            json.dumps({"_id": "realuser1", "rated": {"tt001": ["1"]}}) + "\n", encoding="utf-8"
+        )
+
+        supplementary_path = tmp_path / "supplement.csv"
+        pd.DataFrame(
+            [{"movie_id": "tt999", "title": "Supplementary Movie", "release_year": 2021,
+              "imdb_rating": float("nan"), "languages": "Telugu", **{g: 0 for g in GENRE_COLUMNS}}]
+        ).to_csv(supplementary_path, index=False)
+
+        # Simulate a processed/ dir cached *before* the supplement existed: right schema
+        # (every genre column present), but missing tt999 entirely.
+        processed_dir.mkdir(parents=True)
+        pd.DataFrame(columns=["user_id", "movie_id", "rating"]).to_csv(processed_dir / "train.csv", index=False)
+        pd.DataFrame(columns=["user_id", "movie_id", "rating"]).to_csv(processed_dir / "test.csv", index=False)
+        pd.DataFrame(
+            [{"movie_id": "tt001", "title": "A Real Movie", "release_year": 2020,
+              "imdb_rating": 8.0, "languages": "", **{g: 0 for g in GENRE_COLUMNS}}]
+        ).to_csv(processed_dir / "movies.csv", index=False)
+        pd.DataFrame(columns=["user_id", "age"]).to_csv(processed_dir / "users.csv", index=False)
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("run_pipeline hit Kaggle even though a valid raw-data cache exists")
+
+        monkeypatch.setattr("kaggle.api.authenticate", _fail_if_called)
+
+        result = run_pipeline(
+            raw_dir=raw_dir, processed_dir=processed_dir,
+            supplementary_movies_path=supplementary_path,
+        )
+
+        # Rebuilt and re-merged, not served stale -- the supplementary movie is now present.
+        assert set(result["movies"]["movie_id"]) == {"tt001", "tt999"}
