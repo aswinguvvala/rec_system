@@ -935,6 +935,28 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   the tagline's bounding-box center now exactly matches the title's, and that the page
   ends after the recommendation grid with no expander below it.
 
+## Emojis removed from Compare Models (Phase 13d)
+- User feedback, continuing the same emoji-removal thread: drop the emojis from the
+  Compare Models view too.
+- The four shelf headers in compare mode ("Content-Based", "SVD (Collaborative)",
+  "Hybrid", the fourth popularity/similar-to-picks panel) each carried an emoji icon
+  (film clapper, handshake, shuffle, bar chart) rendered in `render_shelf`'s header
+  next to the title. Removed the `icon` parameter from `render_shelf` entirely (its
+  only call site, the compare-mode `panel_order` loop, was the sole place emojis were
+  ever passed in) and dropped the now-unused emoji field from `SOURCE_META` -- the
+  latter was already unused dead data (unpacked as `_emoji` and discarded at its one
+  call site in `_movie_card_html`), so this was a real cleanup, not just emoji
+  removal. The per-card colored source dots (teal/violet/gold/sky-blue) are unchanged
+  and remain the only visual model-identity cue on cards, same as the hover-overlay
+  labels.
+- Left two emoji untouched as out of scope for this request: the browser-tab favicon
+  (`page_icon`) and the generic film-clapper fallback shown on a movie card when no
+  poster image is available -- neither is specific to Compare Models (the favicon is
+  global app chrome; the poster fallback appears identically in single-view mode).
+- No `src/` changes; `pytest tests/ -v` unaffected (138 passed). Verified live locally
+  via the browser tool: all four Compare Models shelf headers (Content-Based, SVD
+  (Collaborative), Hybrid, Popularity Baseline) render as plain text with no icons.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
