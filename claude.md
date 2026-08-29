@@ -860,6 +860,26 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   time a Streamlit Cloud log view looks hung: open a fresh tab on the app URL itself
   before concluding the deploy is actually broken.
 
+## Hero copy simplified (Phase 13)
+- User feedback: center the header, drop the "unwanted stuff," and make "Indian Movie
+  Recommendation" the title, with a plain one-line "recommend movies to watch"
+  subtitle underneath.
+- `app.py`'s hero block changed: dropped the `.navbar-tag` eyebrow line ("Indian
+  Regional Cinema -- Hybrid ML Recommender") entirely, kept just the `\U0001f3ac
+  CineMatch` brand wordmark. `<h1 class="hero-title">` changed from "Find your next
+  favorite film." to "Indian Movie Recommendation"; the technical tagline ("Content-
+  based genre matching and a from-scratch SVD collaborative filter, blended into a
+  hybrid model, trained on real ratings across 18 Indian languages.") replaced with a
+  plain "Get recommendations for movies to watch." `.navbar` and `.hero` CSS switched
+  from left-aligned/baseline-flex to centered (`justify-content: center` /
+  `text-align: center`, `.hero-tagline` given `margin: 0 auto` so its `max-width`
+  still centers instead of just clipping left-aligned).
+- No changes to `src/`, so `pytest tests/ -v` is unaffected (138 passed) -- per
+  convention `app.py` isn't unit-tested, verified live instead: ran
+  `streamlit run app.py` locally and confirmed via the browser tool the header now
+  renders centered with the new title/subtitle and no leftover eyebrow text, single-
+  view recommendations still render normally underneath.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
