@@ -880,6 +880,19 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   renders centered with the new title/subtitle and no leftover eyebrow text, single-
   view recommendations still render normally underneath.
 
+## Rebrand: CineMatch -> MovieMatch (Phase 13b)
+- User feedback, immediately after Phase 13 shipped: drop the film-clapper emoji next
+  to the brand name, and rename the brand itself from "CineMatch" to "MovieMatch."
+- Two literal string changes in `app.py`: `st.set_page_config(page_title=...)` (browser
+  tab title) and the `.navbar-brand` span's text both changed from `"\U0001f3ac
+  CineMatch"`/`"CineMatch"` to plain `"MovieMatch"` -- no emoji prefix. Updated both
+  for consistency (the tab title and the on-page wordmark had always matched) rather
+  than just the visible one asked about directly.
+- No other file references "CineMatch" by name (checked `app.py` and `README.md`), so
+  no other files needed touching. No `src/` changes; `pytest tests/ -v` unaffected
+  (138 passed). Verified live locally via the browser tool: navbar now reads plain
+  "MOVIEMATCH" (no emoji), centered, browser tab title reads "MovieMatch".
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to

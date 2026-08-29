@@ -45,7 +45,7 @@ from src.posters import get_poster_urls_by_imdb_id
 from src.utils import RESULTS_DIR
 
 st.set_page_config(
-    page_title="CineMatch",
+    page_title="MovieMatch",
     page_icon="\U0001f3ac",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -421,7 +421,7 @@ tmdb_api_key = get_tmdb_api_key()
 st.markdown(
     """
 <div class="navbar">
-  <span class="navbar-brand">\U0001f3ac CineMatch</span>
+  <span class="navbar-brand">MovieMatch</span>
 </div>
 <div class="hero">
   <h1 class="hero-title">Indian Movie Recommendation</h1>
