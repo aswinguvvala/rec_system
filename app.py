@@ -95,7 +95,7 @@ html, body, [class*="css"] { font-family: var(--font); }
 
 /* Navbar */
 .navbar {
-    display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
+    display: flex; justify-content: center;
     padding-bottom: 1rem; margin-bottom: .25rem;
     border-bottom: 1px solid var(--border);
     position: relative; z-index: 1;
@@ -104,15 +104,14 @@ html, body, [class*="css"] { font-family: var(--font); }
     font-weight: 900; font-size: 1.4rem; letter-spacing: .01em;
     color: var(--accent-red); text-transform: uppercase;
 }
-.navbar-tag { font-size: .78rem; color: var(--text-muted); font-weight: 500; }
 
 /* Hero */
-.hero { padding: 1.5rem 0 1.1rem; position: relative; z-index: 1; }
+.hero { padding: 1.5rem 0 1.1rem; position: relative; z-index: 1; text-align: center; }
 .hero-title {
     font-weight: 800; font-size: 2.3rem; line-height: 1.15;
     color: var(--text); margin: 0 0 .5rem; letter-spacing: -.01em;
 }
-.hero-tagline { font-size: .92rem; color: var(--text-muted); max-width: 68ch; line-height: 1.5; }
+.hero-tagline { font-size: .92rem; color: var(--text-muted); max-width: 68ch; line-height: 1.5; margin: 0 auto; }
 .key-hint { font-size: .78rem; color: var(--text-muted); margin: -.4rem 0 .5rem; }
 
 /* Toolbar -- replaces the old sidebar; one horizontal bar of native widgets */
@@ -423,12 +422,10 @@ st.markdown(
     """
 <div class="navbar">
   <span class="navbar-brand">\U0001f3ac CineMatch</span>
-  <span class="navbar-tag">Indian Regional Cinema &middot; Hybrid ML Recommender</span>
 </div>
 <div class="hero">
-  <h1 class="hero-title">Find your next favorite film.</h1>
-  <p class="hero-tagline">Content-based genre matching and a from-scratch SVD collaborative filter, blended into
-  a hybrid model, trained on real ratings across 18 Indian languages.</p>
+  <h1 class="hero-title">Indian Movie Recommendation</h1>
+  <p class="hero-tagline">Get recommendations for movies to watch.</p>
 </div>
 """,
     unsafe_allow_html=True,
