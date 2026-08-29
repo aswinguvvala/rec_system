@@ -455,35 +455,70 @@ def random_train_test_split(
     return train_df, test_df
 
 
-def _processed_cache_is_usable(movies_path: Path) -> bool:
-    """Check that a cached ``movies.csv`` actually matches this pipeline's schema.
+def _processed_cache_is_usable(
+    movies_path: Path, supplementary_movies_path: Path | None = None
+) -> bool:
+    """Check that a cached ``movies.csv`` actually matches this pipeline's current inputs.
 
     Guards against a real failure mode: ``data/processed/`` is gitignored, so
     it isn't wiped by a code-only redeploy -- a persistent host (e.g. a
     Streamlit Cloud container reused across deploys) can retain processed
-    CSVs from a *previous, different* dataset. That bit this project for
-    real when it moved off MovieLens: the leftover MovieLens ``movies.csv``
-    (19 genre columns) satisfied the old "do the files exist" check, so it
-    got loaded as-is, and every model choked with ``KeyError`` on the six
-    genre columns (``Biography``, ``Family``, ``History``, ``Music``,
-    ``News``, ``Sport``) that only exist in this dataset's taxonomy. Only
-    the header needs reading, not the full file, so this check is cheap
-    enough to run on every cache hit.
+    CSVs that no longer reflect what this pipeline would currently produce.
+    Two distinct ways that's shown up in practice, both checked here:
+
+    1. **Wrong schema.** That bit this project for real when it moved off
+       MovieLens: the leftover MovieLens ``movies.csv`` (19 genre columns)
+       satisfied the old "do the files exist" check, so it got loaded
+       as-is, and every model choked with ``KeyError`` on the six genre
+       columns (``Biography``, ``Family``, ``History``, ``Music``,
+       ``News``, ``Sport``) that only exist in this dataset's taxonomy.
+    2. **Right schema, stale content.** A same-schema change -- e.g. the
+       TMDb-sourced supplementary catalog (see
+       ``src/movie_discovery.py``) growing the row count without touching
+       a single column -- passes check 1 undetected, since a schema check
+       alone can't see a content/count difference. Caught this for real on
+       the live deploy: pushing the supplement merge left the site serving
+       the pre-supplement catalog, because the already-cached
+       ``movies.csv`` still had every genre column and so still passed the
+       old check. If a supplementary file is given, this now also
+       confirms every one of its ``movie_id``s actually made it into the
+       cache.
 
     Args:
         movies_path: Path to the cached ``movies.csv``.
+        supplementary_movies_path: Path to the optional supplementary movie
+            catalog this pipeline run would merge in (see
+            :func:`load_supplementary_movies`). If given and the file
+            exists, the cache is only considered usable when every one of
+            its ``movie_id``s is already present in ``movies_path``. If
+            ``None`` or the file doesn't exist, this check is skipped
+            (nothing to compare against).
 
     Returns:
-        ``True`` if the file exists and its header contains every column in
-        :data:`GENRE_COLUMNS`.
+        ``True`` if the file exists, its columns cover every genre in
+        :data:`GENRE_COLUMNS`, and (when applicable) it already reflects
+        the supplementary catalog.
     """
     if not movies_path.exists():
         return False
     try:
-        header_columns = set(pd.read_csv(movies_path, nrows=0).columns)
+        cached_movies = pd.read_csv(movies_path, dtype={"movie_id": str})
     except (pd.errors.ParserError, pd.errors.EmptyDataError):
         return False
-    return set(GENRE_COLUMNS).issubset(header_columns)
+    if not set(GENRE_COLUMNS).issubset(cached_movies.columns):
+        return False
+
+    if supplementary_movies_path is not None and supplementary_movies_path.exists():
+        try:
+            supplementary_ids = set(
+                pd.read_csv(supplementary_movies_path, dtype={"movie_id": str})["movie_id"]
+            )
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, KeyError):
+            supplementary_ids = set()
+        if supplementary_ids and not supplementary_ids.issubset(set(cached_movies["movie_id"])):
+            return False
+
+    return True
 
 
 def run_pipeline(
@@ -495,10 +530,11 @@ def run_pipeline(
     """Run the full pipeline: download, load, clean, split, and persist.
 
     Idempotent: if the processed CSVs already exist *and match this
-    pipeline's current schema* (see :func:`_processed_cache_is_usable`) and
-    ``force`` is ``False``, they are loaded from disk instead of being
-    recomputed. This is what lets ``app.py`` call this on every Streamlit
-    launch cheaply.
+    pipeline's current inputs* (right schema, and already reflect the
+    supplementary catalog if one is configured -- see
+    :func:`_processed_cache_is_usable`) and ``force`` is ``False``, they are
+    loaded from disk instead of being recomputed. This is what lets ``app.py``
+    call this on every Streamlit launch cheaply.
 
     Args:
         raw_dir: Directory for the raw/cached dataset download.
@@ -523,15 +559,15 @@ def run_pipeline(
     paths = {name: processed_dir / f"{name}.csv" for name in ("train", "test", "movies", "users")}
 
     if not force and all(p.exists() for p in paths.values()):
-        if _processed_cache_is_usable(paths["movies"]):
+        if _processed_cache_is_usable(paths["movies"], supplementary_movies_path):
             logger.info("Loading cached processed data from %s", processed_dir)
             return {
                 name: pd.read_csv(p, dtype={"user_id": str, "movie_id": str})
                 for name, p in paths.items()
             }
         logger.warning(
-            "Cached data at %s doesn't match this pipeline's current schema (likely left over "
-            "from a previous dataset) -- ignoring it and rebuilding from scratch.",
+            "Cached data at %s doesn't match this pipeline's current inputs (wrong schema, or "
+            "missing rows from the supplementary catalog) -- ignoring it and rebuilding from scratch.",
             processed_dir,
         )
 

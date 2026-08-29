@@ -798,6 +798,42 @@ Hybrid Movie Recommendation System — a portfolio project demonstrating product
   more in `tests/test_data_pipeline.py` for the new pipeline functions; 133 tests
   total, all green.
 
+## Fifth caching-related deploy break: same root cause, a new shape (Phase 12b)
+- After merging Phase 12's PR, the user asked directly "is it live?" -- checked the
+  real deployed site (not assumed): searching "Jawan" in the onboarding picker only
+  showed pre-existing base-catalog titles, confirming the supplement never made it
+  onto the live app.
+- Root cause, same failure class as Phase 7/8's first two caching breaks but a new
+  concrete shape: `_processed_cache_is_usable` only ever checked that a cached
+  `movies.csv` had the right *columns*. The catalog-broadening merge didn't touch a
+  single column -- it only added rows -- so a container's already-cached, pre-Phase-12
+  `movies.csv` (2,850 rows, every genre column present) satisfied that check
+  perfectly and the pipeline never re-ran `merge_supplementary_movies`, regardless of
+  whether the new code had even deployed. A schema-only check can't see a
+  content/row-count-only staleness.
+- Fixed by hardening `_processed_cache_is_usable` itself, not by telling the user to
+  just reboot and hope it doesn't recur: it now takes an optional
+  `supplementary_movies_path` and, when given, confirms every one of that file's
+  `movie_id`s is already present in the cached `movies.csv` before trusting the
+  cache -- catches this specific "right schema, stale content" case the column-only
+  check structurally couldn't. `run_pipeline` now passes its own
+  `supplementary_movies_path` through to the check. 5 new tests (unit-level cache
+  logic plus a real end-to-end `run_pipeline` integration test reproducing the exact
+  live scenario: a schema-valid cache missing the supplementary movie, next to a
+  valid raw dataset and a real supplement file -- asserts the pipeline rebuilds and
+  the merge actually happens). 138 tests total, all green.
+- **General lesson, sharpened from Phase 7/8's**: "does the cache match the current
+  schema" and "does the cache reflect the current *inputs*" are different questions --
+  a schema-only staleness check will always miss a same-schema content change. Any
+  future input to this pipeline that can change without changing `movies.csv`'s
+  columns (this supplementary catalog is the first, but not necessarily the last)
+  needs its own explicit check here, not an assumption that the schema check already
+  covers it.
+- Still required an explicit Reboot from the Streamlit Cloud dashboard to actually
+  take effect on the already-running container -- the code fix prevents this *class*
+  of staleness on the next input change, it doesn't retroactively un-stale a
+  container that already has the old cache on disk.
+
 ## Known environment quirks
 - pandas 3.0.5's compiled Cython DLLs were blocked by this machine's Windows
   Application Control policy on install (numpy/scipy were unaffected). Pinned to
